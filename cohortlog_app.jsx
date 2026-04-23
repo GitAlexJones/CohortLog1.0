@@ -1,0 +1,1090 @@
+import React, { useState, useMemo } from "react";
+import {
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
+  ResponsiveContainer, BarChart, Bar, ComposedChart, Area, Legend,
+} from "recharts";
+
+// ═══════════════════════════════════════════════════════════════════════
+// COHORTLOG — Life Table analysis module, ELECTROFRY series
+// ═══════════════════════════════════════════════════════════════════════
+
+const INITIAL_DATA = [
+  { x: 0, Nt: 1000, bt: 0 },
+  { x: 1, Nt: 930,  bt: 0 },
+  { x: 2, Nt: 920,  bt: 0 },
+  { x: 3, Nt: 880,  bt: 0 },
+  { x: 4, Nt: 860,  bt: 2 },
+  { x: 5, Nt: 840,  bt: 4 },
+  { x: 6, Nt: 710,  bt: 4 },
+  { x: 7, Nt: 450,  bt: 3 },
+  { x: 8, Nt: 230,  bt: 1 },
+  { x: 9, Nt: 50,   bt: 0 },
+];
+
+// ── Core math ──────────────────────────────────────────────────────────
+function computeLifeTable(rows) {
+  const N0 = rows[0]?.Nt || 1;
+  const out = rows.map((r, i) => {
+    const next = rows[i + 1];
+    const Nt1 = next ? next.Nt : 0;
+    const lx = r.Nt / N0;
+    const dx = r.Nt - Nt1;
+    const qx = r.Nt > 0 ? dx / r.Nt : 0;
+    const sx = r.Nt > 0 ? Nt1 / r.Nt : 0;
+    const lxbx = lx * r.bt;
+    const xlxbx = r.x * lxbx;
+    return { ...r, lx, dx, qx, sx, lxbx, xlxbx };
+  });
+  const R0 = out.reduce((s, r) => s + r.lxbx, 0);
+  const sumXlxbx = out.reduce((s, r) => s + r.xlxbx, 0);
+  const T = R0 > 0 ? sumXlxbx / R0 : 0;
+  const r = R0 > 0 ? Math.log(R0) / T : 0;
+  const lambda = Math.exp(r);
+  return { rows: out, R0, T, r, lambda, sumXlxbx };
+}
+
+// ── Palette ────────────────────────────────────────────────────────────
+const C = {
+  bg0:    "#0a2230",
+  bg1:    "#0f3347",
+  bg2:    "#1a4a63",
+  panel:  "#061520",
+  panelBorder: "#1d4054",
+  amber:  "#e8c35a",
+  amberDim: "#b0913f",
+  amberBright: "#f5d676",
+  text:   "#d6e3ea",
+  textDim: "#7d99a8",
+  lineAmber: "#d4a84a",
+  cyan:   "#5ecce0",
+  red:    "#d87060",
+  green:  "#6ac27a",
+  inputBg: "#0a2a3a",
+  tabBlue: "#1a5478",
+  tabBlueActive: "#2a729c",
+};
+
+// ══════════════════════════════════════════════════════════════════════
+// PRIMITIVES — match ELECTROFRY style
+// ══════════════════════════════════════════════════════════════════════
+
+// Category heading with yellow left tick mark
+const Category = ({ children }) => (
+  <div style={{
+    display: "flex", alignItems: "center", gap: 10,
+    marginTop: 28, marginBottom: 14,
+    paddingLeft: 2,
+  }}>
+    <div style={{
+      width: 3, height: 18, background: C.amber,
+      boxShadow: `0 0 6px ${C.amber}`,
+    }}/>
+    <div style={{
+      fontFamily: '"VT323", "Courier New", monospace',
+      fontSize: 18, color: C.amber, letterSpacing: "0.18em",
+      textTransform: "uppercase", fontWeight: 400,
+    }}>{children}</div>
+  </div>
+);
+
+// Collapsible accordion panel
+const Panel = ({ title, defaultOpen = false, children, status }) => {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div style={{
+      background: `linear-gradient(180deg, ${C.panel} 0%, #04101a 100%)`,
+      border: `1px solid ${C.panelBorder}`,
+      borderRadius: 3, marginBottom: 12,
+      boxShadow: "inset 0 1px 0 rgba(255,255,255,0.03), 0 2px 8px rgba(0,0,0,0.3)",
+      overflow: "hidden",
+    }}>
+      <button
+        onClick={() => setOpen(!open)}
+        style={{
+          width: "100%", display: "flex", alignItems: "center",
+          justifyContent: "space-between", padding: "14px 18px",
+          background: "transparent", border: "none", cursor: "pointer",
+          borderBottom: open ? `1px solid ${C.panelBorder}` : "none",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <span style={{
+            color: C.amber, fontFamily: '"VT323", monospace', fontSize: 18,
+            transform: open ? "rotate(90deg)" : "rotate(0deg)",
+            transition: "transform 160ms",
+            display: "inline-block",
+          }}>&gt;</span>
+          <span style={{
+            fontFamily: '"VT323", "Courier New", monospace',
+            fontSize: 17, color: C.amber, letterSpacing: "0.14em",
+            textTransform: "uppercase",
+          }}>{title}</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {status && (
+            <span style={{
+              fontFamily: '"VT323", monospace', fontSize: 12,
+              color: C.textDim, letterSpacing: "0.15em",
+            }}>{status}</span>
+          )}
+          <span style={{
+            color: C.amberDim, fontFamily: "monospace", fontSize: 11,
+          }}>▸</span>
+        </div>
+      </button>
+      {open && (
+        <div style={{ padding: "16px 20px 20px" }}>
+          {children}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Body text
+const P = ({ children, style }) => (
+  <p style={{
+    fontFamily: '"IBM Plex Sans", "Helvetica Neue", sans-serif',
+    fontSize: 14, lineHeight: 1.65, color: C.text, margin: "0 0 12px",
+    ...style,
+  }}>{children}</p>
+);
+
+// Inline monospace term
+const Term = ({ children }) => (
+  <span style={{
+    fontFamily: '"VT323", monospace', fontSize: 16,
+    color: C.amber, letterSpacing: "0.05em",
+  }}>{children}</span>
+);
+
+// Formula display block
+const Formula = ({ children, note }) => (
+  <div style={{
+    background: "rgba(232,195,90,0.06)",
+    border: `1px solid rgba(232,195,90,0.3)`,
+    borderLeft: `3px solid ${C.amber}`,
+    padding: "12px 16px", margin: "10px 0", borderRadius: 2,
+  }}>
+    <div style={{
+      fontFamily: '"VT323", monospace', fontSize: 18,
+      color: C.amberBright, letterSpacing: "0.04em",
+    }}>{children}</div>
+    {note && (
+      <div style={{
+        fontFamily: '"IBM Plex Sans", sans-serif', fontSize: 12,
+        color: C.textDim, marginTop: 6, fontStyle: "italic",
+      }}>{note}</div>
+    )}
+  </div>
+);
+
+// Worked example callout
+const Example = ({ children }) => (
+  <div style={{
+    background: "rgba(94,204,224,0.05)",
+    border: `1px solid rgba(94,204,224,0.25)`,
+    borderLeft: `3px solid ${C.cyan}`,
+    padding: "12px 16px", margin: "12px 0", borderRadius: 2,
+  }}>
+    <div style={{
+      fontFamily: '"VT323", monospace', fontSize: 12,
+      color: C.cyan, letterSpacing: "0.2em", marginBottom: 6,
+    }}>▸ WORKED EXAMPLE</div>
+    <div style={{
+      fontFamily: '"IBM Plex Sans", sans-serif', fontSize: 13.5,
+      color: C.text, lineHeight: 1.6,
+    }}>{children}</div>
+  </div>
+);
+
+// Simple label + value pair
+const KV = ({ k, v, color = C.amber }) => (
+  <div style={{ display: "flex", justifyContent: "space-between",
+    padding: "4px 0", fontFamily: '"VT323", monospace',
+    fontSize: 15, borderBottom: `1px dashed ${C.panelBorder}`,
+  }}>
+    <span style={{ color: C.textDim, letterSpacing: "0.05em" }}>{k}</span>
+    <span style={{ color, letterSpacing: "0.05em" }}>{v}</span>
+  </div>
+);
+
+// Section tick-header (smaller than Category)
+const MiniHead = ({ children }) => (
+  <div style={{
+    fontFamily: '"VT323", monospace', fontSize: 13,
+    color: C.amberDim, letterSpacing: "0.2em", textTransform: "uppercase",
+    marginBottom: 8, marginTop: 16,
+  }}>// {children}</div>
+);
+
+// ══════════════════════════════════════════════════════════════════════
+// PAGE: LEARN ( = "REFERENCE")
+// ══════════════════════════════════════════════════════════════════════
+
+const LearnPage = () => (
+  <>
+    <Category>What is a life table?</Category>
+
+    <Panel title="START HERE · The one-paragraph version" defaultOpen status="BEGINNER">
+      <P>
+        A life table is a simple bookkeeping sheet. You follow a group of fish all born
+        in the same year (a <Term>cohort</Term>), count how many are still alive at each
+        birthday, and write down how many offspring the survivors produce. From just
+        those two columns of field data, you can calculate whether the population is
+        growing, shrinking, or holding steady — and how fast.
+      </P>
+      <P style={{ color: C.textDim, margin: 0 }}>
+        Everything else in this app is unpacking that one idea.
+      </P>
+    </Panel>
+
+    <Panel title="Why fisheries biologists use them" status="BEGINNER">
+      <P>
+        Fisheries management needs to know if current fishing pressure is sustainable.
+        Catch curves tell you the mortality rate, but only a life table combines
+        mortality with reproduction, so you can answer the real question:{" "}
+        <em style={{ color: C.amberBright }}>are enough new fish being produced to
+        replace the ones being removed?</em>
+      </P>
+      <P>
+        Every management lever — minimum size limits, closed seasons, slot limits —
+        changes a specific column of the life table. Once you see how the columns
+        connect, the effects of each policy become obvious.
+      </P>
+    </Panel>
+
+    <Panel title="Cohort vs. Static tables — two ways to build one">
+      <MiniHead>Cohort (dynamic)</MiniHead>
+      <P>
+        Tag 1,000 fry, come back every year, count how many are left. Clean data,
+        but it takes a decade and you'll lose most of your tags. Rare in wild fish
+        studies, common in hatchery work.
+      </P>
+      <MiniHead>Static (time-specific)</MiniHead>
+      <P>
+        One big sample, one afternoon. Age every fish you catch (otoliths, scales),
+        then <em>assume</em> the age distribution you see represents what happens to
+        a single cohort over time. Easier, but relies on the stable-age-distribution
+        assumption.
+      </P>
+      <P style={{ color: C.textDim, fontSize: 13 }}>
+        The data in this app is cohort-format: N(t) decreases every year because
+        we're following the same 1,000 fish shrinking over time.
+      </P>
+    </Panel>
+
+    <Category>The columns, one by one</Category>
+
+    <Panel title="x — Age class" defaultOpen status="INPUT">
+      <P>
+        Age in years. Row 0 is the first year of life (ages 0 to 1). The rest follow
+        sequentially. Could also be months or life stages (egg, larva, juvenile,
+        adult) for species where age is hard to measure.
+      </P>
+      <Example>
+        Our fish live to a maximum age of 9 years, so x runs from 0 to 9.
+      </Example>
+    </Panel>
+
+    <Panel title="N(t) — Number alive at age x" status="INPUT · FIELD DATA">
+      <P>
+        How many of the original cohort are still alive at the start of age x.
+        This is observed data — the raw counts from your field surveys.
+      </P>
+      <P>
+        N(t) always starts high and decreases. The starting value N(0) is arbitrary
+        (often set to 1,000 for easy mental math), since the life table analyzes
+        <em>proportions</em>, not absolute numbers.
+      </P>
+      <Example>
+        In our data, N(0) = 1000 fish. By age 5, only N(5) = 840 are still alive.
+        By age 9, just 50 remain.
+      </Example>
+    </Panel>
+
+    <Panel title="b(t) — Fecundity" status="INPUT · FIELD DATA">
+      <P>
+        Average number of <strong>female</strong> offspring produced per female at
+        age x, per year. Also observed data.
+      </P>
+      <P>
+        Why only females? Because females are the bottleneck on population growth —
+        males can fertilize many females. If sex ratio is 1:1, the answer ends up the
+        same either way. You'll also see this written as <Term>m(x)</Term> in some
+        textbooks; it means exactly the same thing.
+      </P>
+      <P>
+        b(t) is usually 0 before maturity, rises to a peak in prime reproductive
+        years, then may decline in old age.
+      </P>
+      <Example>
+        In our data, no fish reproduce before age 4. Peak fecundity is 4 female
+        offspring per female per year, happening at ages 5 and 6.
+      </Example>
+    </Panel>
+
+    <Panel title="l(x) — Survivorship (DERIVED)">
+      <Formula note="Proportion of original cohort still alive at age x. Always starts at 1.">
+        l(x) = N(x) / N(0)
+      </Formula>
+      <P>
+        This is N(t) normalized so it starts at 1. Makes it comparable across
+        species and studies with different starting counts.
+      </P>
+      <Example>
+        At age 5: l(5) = 840 / 1000 = <strong style={{ color: C.amberBright }}>0.840</strong>.{" "}
+        So 84% of the cohort made it to their fifth birthday.
+        <br/><br/>
+        At age 9: l(9) = 50 / 1000 = <strong style={{ color: C.amberBright }}>0.050</strong>.{" "}
+        Only 5% survive to maximum age.
+      </Example>
+    </Panel>
+
+    <Panel title="d(x) — Number dying in interval (DERIVED)">
+      <Formula note="Deaths between age x and x+1.">
+        d(x) = N(x) − N(x+1)
+      </Formula>
+      <P>
+        The raw count of fish that died during that year of life.
+      </P>
+      <Example>
+        At age 5: d(5) = N(5) − N(6) = 840 − 710 = <strong style={{ color: C.amberBright }}>130 fish</strong>{" "}
+        died between their 5th and 6th birthdays.
+      </Example>
+    </Panel>
+
+    <Panel title="q(x) — Age-specific mortality rate (DERIVED)">
+      <Formula note="The proportion of fish alive at age x that die before age x+1.">
+        q(x) = d(x) / N(x)
+      </Formula>
+      <P>
+        The probability a fish alive at age x will die during that year. Always
+        between 0 and 1. In the final row, q(x) = 1 because everyone left dies
+        during the last interval.
+      </P>
+      <Example>
+        At age 5: q(5) = 130 / 840 = <strong style={{ color: C.amberBright }}>0.155</strong>.{" "}
+        A 5-year-old fish has a 15.5% chance of not making it to age 6.
+        <br/><br/>
+        At age 7: q(7) = 220 / 450 = <strong style={{ color: C.amberBright }}>0.489</strong>.{" "}
+        Almost half of all 7-year-olds die during the year.
+      </Example>
+    </Panel>
+
+    <Panel title="l(x)·b(x) — Reproductive contribution (DERIVED)">
+      <Formula note="Survival probability × fecundity at age x.">
+        l(x)·b(x)
+      </Formula>
+      <P>
+        Expected female offspring a <em>newborn</em> from the cohort will produce when
+        she reaches age x — accounting for the fact that she might not make it.
+      </P>
+      <P>
+        This is the key column. A fish that lays 1,000 eggs is useless to the
+        population if only 1% survive to lay them. l(x)·b(x) handles that discount.
+      </P>
+      <Example>
+        At age 5: l(5)·b(5) = 0.840 × 4 = <strong style={{ color: C.amberBright }}>3.36</strong>.{" "}
+        On average, a newborn in this cohort is expected to produce 3.36 offspring
+        specifically at her 5th birthday.
+      </Example>
+    </Panel>
+
+    <Panel title="x·l(x)·b(x) — Age-weighted contribution (DERIVED)">
+      <Formula note="Reproductive contribution multiplied by the age at which it happens.">
+        x · l(x) · b(x)
+      </Formula>
+      <P>
+        Used only for calculating generation time. You can skip to the next section
+        if you don't care where T comes from.
+      </P>
+      <Example>
+        At age 5: 5 × 0.840 × 4 = <strong style={{ color: C.amberBright }}>16.80</strong>.
+        <br/>
+        At age 6: 6 × 0.710 × 4 = <strong style={{ color: C.amberBright }}>17.04</strong>.
+        <br/>
+        The 6-year-olds contribute more to the sum even though they produce the same
+        per-capita output — because they're older.
+      </Example>
+    </Panel>
+
+    <Category>The three big metrics</Category>
+
+    <Panel title="R₀ — Net reproductive rate (the headline number)" defaultOpen status="KEY METRIC">
+      <Formula note="Sum the l(x)·b(x) column. That's it.">
+        R₀ = Σ l(x) · b(x)
+      </Formula>
+      <P>
+        The average number of female offspring each female produces over her entire
+        lifetime, already adjusted for the chance she dies before reproducing.
+      </P>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+        gap: 8, margin: "12px 0" }}>
+        <div style={{ padding: 10, background: "rgba(106,194,122,0.08)",
+          border: `1px solid ${C.green}`, borderRadius: 2 }}>
+          <div style={{ fontFamily: '"VT323", monospace', color: C.green,
+            fontSize: 15 }}>R₀ &gt; 1</div>
+          <div style={{ fontSize: 12, color: C.text, marginTop: 4 }}>
+            Growing. Each female more than replaces herself.
+          </div>
+        </div>
+        <div style={{ padding: 10, background: "rgba(232,195,90,0.08)",
+          border: `1px solid ${C.amber}`, borderRadius: 2 }}>
+          <div style={{ fontFamily: '"VT323", monospace', color: C.amber,
+            fontSize: 15 }}>R₀ = 1</div>
+          <div style={{ fontSize: 12, color: C.text, marginTop: 4 }}>
+            Stable. Exact replacement.
+          </div>
+        </div>
+        <div style={{ padding: 10, background: "rgba(216,112,96,0.08)",
+          border: `1px solid ${C.red}`, borderRadius: 2 }}>
+          <div style={{ fontFamily: '"VT323", monospace', color: C.red,
+            fontSize: 15 }}>R₀ &lt; 1</div>
+          <div style={{ fontSize: 12, color: C.text, marginTop: 4 }}>
+            Declining. Not enough offspring to replace adults.
+          </div>
+        </div>
+      </div>
+      <Example>
+        Our data: R₀ = 0 + 0 + 0 + 0 + 1.72 + 3.36 + 2.84 + 1.35 + 0.23 + 0 ={" "}
+        <strong style={{ color: C.amberBright }}>9.50</strong>
+        <br/><br/>
+        Each female in this population produces an average of 9.5 female offspring in
+        her lifetime. This stock is thriving.
+      </Example>
+    </Panel>
+
+    <Panel title="T — Generation time" status="KEY METRIC">
+      <Formula note="Mean age at which mothers produce offspring.">
+        T = Σ x · l(x) · b(x)  /  R₀
+      </Formula>
+      <P>
+        The average age of a mother when her offspring are born. A weighted mean
+        where the weights are reproductive contributions.
+      </P>
+      <P>
+        Short T = fast-turnover species (anchovies, minnows). Long T = slow-turnover
+        species (sturgeon, rockfish). Matters because populations with long T are
+        much slower to recover from depletion.
+      </P>
+      <Example>
+        Our data: T = 52.01 / 9.50 = <strong style={{ color: C.amberBright }}>5.47 years</strong>.
+        <br/><br/>
+        On average, mothers in this population produce offspring when they are
+        about 5.5 years old.
+      </Example>
+    </Panel>
+
+    <Panel title="r — Intrinsic rate of increase" status="KEY METRIC">
+      <Formula note="Approximation. Exact solution requires the Euler–Lotka equation.">
+        r ≈ ln(R₀) / T
+      </Formula>
+      <P>
+        The per-capita growth rate in continuous time. Plug into N(t) = N₀·eʳᵗ to
+        project population size forward.
+      </P>
+      <P>
+        r and R₀ tell you the same story in different units. R₀ measures growth
+        per generation. r measures growth per year. For management decisions on an
+        annual basis (quotas, seasons), r is usually more useful.
+      </P>
+      <Example>
+        Our data: r = ln(9.50) / 5.47 = 2.251 / 5.47 ={" "}
+        <strong style={{ color: C.amberBright }}>0.411 per year</strong>.
+        <br/><br/>
+        At this rate, population size grows by about 41% per year (continuous compounding).
+      </Example>
+    </Panel>
+
+    <Panel title="λ — Finite rate of increase (bonus)">
+      <Formula note="Annual multiplier. λ = e^r.">
+        λ = e^r
+      </Formula>
+      <P>
+        Some textbooks prefer λ (lambda) to r. Same information, different packaging.
+        λ = 1.5 means the population multiplies by 1.5× each year.
+      </P>
+      <Example>
+        Our data: λ = e^0.411 = <strong style={{ color: C.amberBright }}>1.509</strong>.
+        Population size is multiplied by about 1.5× per year.
+      </Example>
+    </Panel>
+  </>
+);
+
+// ══════════════════════════════════════════════════════════════════════
+// PAGE: CALCULATE
+// ══════════════════════════════════════════════════════════════════════
+
+const CalcPage = ({ rawData, setRawData, computed }) => {
+  const { rows, R0, T, r: rRate, lambda } = computed;
+
+  const updateCell = (i, field, val) => {
+    const n = parseFloat(val);
+    const copy = [...rawData];
+    copy[i] = { ...copy[i], [field]: isNaN(n) ? 0 : Math.max(0, n) };
+    setRawData(copy);
+  };
+
+  const reset = () => setRawData(INITIAL_DATA.map(r => ({ ...r })));
+  const fmt = (v, d = 3) =>
+    v === 0 ? "—" : (typeof v === "number" && isFinite(v) ? v.toFixed(d) : "—");
+
+  return (
+    <>
+      <Category>Working sheet</Category>
+
+      <Panel title="Input data · N(t) and b(t)" defaultOpen status="EDITABLE">
+        <P>
+          Edit the two yellow columns. All other columns recalculate automatically.
+          The field data here is a salmonid-like dataset of 1,000 fry tracked to senescence.
+        </P>
+
+        <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+          <button onClick={reset} style={{
+            fontFamily: '"VT323", monospace', fontSize: 14,
+            letterSpacing: "0.1em", textTransform: "uppercase",
+            background: "transparent", color: C.amber,
+            border: `1px solid ${C.amber}`,
+            padding: "6px 14px", cursor: "pointer", borderRadius: 2,
+          }}>
+            &gt; RESET TO ORIGINAL
+          </button>
+        </div>
+
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse",
+            fontFamily: '"VT323", monospace', fontSize: 15, minWidth: 640 }}>
+            <thead>
+              <tr style={{ background: "rgba(232,195,90,0.08)",
+                borderTop: `1px solid ${C.amber}`,
+                borderBottom: `1px solid ${C.amber}` }}>
+                {[
+                  ["x", C.amber],
+                  ["N(t)", C.amberBright],
+                  ["b(t)", C.amberBright],
+                  ["l(x)", C.textDim],
+                  ["d(x)", C.textDim],
+                  ["q(x)", C.textDim],
+                  ["l·b", C.textDim],
+                  ["x·l·b", C.textDim],
+                ].map(([h, col], i) => (
+                  <th key={h} style={{
+                    padding: "10px 8px", textAlign: "center",
+                    color: col, letterSpacing: "0.12em",
+                    fontWeight: 400,
+                    borderRight: i < 7 ? `1px solid ${C.panelBorder}` : "none",
+                  }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, i) => (
+                <tr key={i} style={{
+                  borderBottom: `1px solid ${C.panelBorder}`,
+                  background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.02)",
+                }}>
+                  <td style={tdCell(C.amber)}>{r.x}</td>
+                  <td style={tdCell(C.amberBright)}>
+                    <input type="number" value={r.Nt}
+                      onChange={(e) => updateCell(i, "Nt", e.target.value)}
+                      style={inputStyle} />
+                  </td>
+                  <td style={tdCell(C.amberBright)}>
+                    <input type="number" value={r.bt}
+                      onChange={(e) => updateCell(i, "bt", e.target.value)}
+                      style={inputStyle} />
+                  </td>
+                  <td style={tdCell(C.text)}>{fmt(r.lx)}</td>
+                  <td style={tdCell(C.text)}>{r.dx}</td>
+                  <td style={tdCell(C.text)}>{fmt(r.qx)}</td>
+                  <td style={tdCell(C.text)}>{fmt(r.lxbx)}</td>
+                  <td style={tdCell(C.text)}>{fmt(r.xlxbx)}</td>
+                </tr>
+              ))}
+              <tr style={{ background: "rgba(232,195,90,0.12)",
+                borderTop: `1px solid ${C.amber}` }}>
+                <td colSpan={6} style={{ padding: "10px 12px", textAlign: "right",
+                  color: C.amber, letterSpacing: "0.1em" }}>Σ ═══▶</td>
+                <td style={{ padding: "10px 8px", textAlign: "center",
+                  color: C.amberBright, letterSpacing: "0.05em" }}>
+                  {rows.reduce((s, r) => s + r.lxbx, 0).toFixed(3)}
+                </td>
+                <td style={{ padding: "10px 8px", textAlign: "center",
+                  color: C.amberBright, letterSpacing: "0.05em" }}>
+                  {rows.reduce((s, r) => s + r.xlxbx, 0).toFixed(3)}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </Panel>
+
+      <Panel title="Demographic parameters · R₀, T, r, λ" defaultOpen status="OUTPUT">
+        <div style={{ display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 12 }}>
+          <MetricBox symbol="R₀" label="NET REPRO. RATE"
+            value={R0.toFixed(3)}
+            note={R0 > 1 ? "Growing ▲" : R0 < 1 ? "Declining ▼" : "Stable ═"}
+            noteColor={R0 > 1 ? C.green : R0 < 1 ? C.red : C.amber}/>
+          <MetricBox symbol="T" label="GENERATION TIME"
+            value={`${T.toFixed(2)} yr`}
+            note="Σ x·l·b / R₀"/>
+          <MetricBox symbol="r" label="INTRINSIC RATE"
+            value={`${rRate.toFixed(3)} /yr`}
+            note="≈ ln(R₀) / T"/>
+          <MetricBox symbol="λ" label="FINITE RATE"
+            value={`${lambda.toFixed(3)}×`}
+            note="e^r · annual multiplier"/>
+        </div>
+      </Panel>
+
+      <Panel title="Step-by-step · How R₀ was calculated" status="HELP">
+        <P>
+          R₀ is just the sum of the l·b column. Here are all ten rows:
+        </P>
+        <div style={{ fontFamily: '"VT323", monospace', fontSize: 15,
+          color: C.text, lineHeight: 1.8, background: "rgba(0,0,0,0.25)",
+          padding: 14, borderRadius: 2, border: `1px solid ${C.panelBorder}` }}>
+          {rows.map((r, i) => (
+            <div key={i} style={{ display: "flex", justifyContent: "space-between" }}>
+              <span style={{ color: C.textDim }}>
+                age {r.x}: &nbsp;l({r.x}) × b({r.x}) &nbsp;=&nbsp; {r.lx.toFixed(3)} × {r.bt}
+              </span>
+              <span style={{ color: r.lxbx > 0 ? C.amber : C.textDim }}>
+                = {r.lxbx.toFixed(3)}
+              </span>
+            </div>
+          ))}
+          <div style={{ borderTop: `1px dashed ${C.amber}`, marginTop: 6,
+            paddingTop: 6, display: "flex", justifyContent: "space-between",
+            color: C.amberBright }}>
+            <span>R₀ = sum of column</span>
+            <span>= {R0.toFixed(3)}</span>
+          </div>
+        </div>
+      </Panel>
+    </>
+  );
+};
+
+const tdCell = (color) => ({
+  padding: "8px 6px", textAlign: "center", color,
+  letterSpacing: "0.05em",
+  borderRight: `1px solid ${C.panelBorder}`,
+});
+const inputStyle = {
+  width: 64, background: C.inputBg, border: `1px solid ${C.panelBorder}`,
+  color: C.amberBright, fontFamily: '"VT323", monospace', fontSize: 15,
+  textAlign: "center", padding: "3px 4px", borderRadius: 2,
+  letterSpacing: "0.05em", outline: "none",
+};
+
+const MetricBox = ({ symbol, label, value, note, noteColor = C.textDim }) => (
+  <div style={{
+    background: "rgba(0,0,0,0.25)", border: `1px solid ${C.panelBorder}`,
+    borderLeft: `3px solid ${C.amber}`, padding: "12px 14px", borderRadius: 2,
+  }}>
+    <div style={{ display: "flex", justifyContent: "space-between",
+      alignItems: "baseline", marginBottom: 4 }}>
+      <span style={{ fontFamily: '"VT323", monospace', fontSize: 26,
+        color: C.amberBright }}>{symbol}</span>
+      <span style={{ fontFamily: '"VT323", monospace', fontSize: 11,
+        color: C.textDim, letterSpacing: "0.15em" }}>{label}</span>
+    </div>
+    <div style={{ fontFamily: '"VT323", monospace', fontSize: 24,
+      color: C.amber, letterSpacing: "0.03em" }}>{value}</div>
+    <div style={{ fontFamily: '"VT323", monospace', fontSize: 12,
+      color: noteColor, letterSpacing: "0.08em", marginTop: 4 }}>{note}</div>
+  </div>
+);
+
+// ══════════════════════════════════════════════════════════════════════
+// PAGE: CURVES
+// ══════════════════════════════════════════════════════════════════════
+
+const CurvesPage = ({ computed }) => {
+  const { rows } = computed;
+
+  const axis = {
+    stroke: C.textDim,
+    tick: { fill: C.text, fontSize: 12, fontFamily: '"VT323", monospace' },
+  };
+  const tip = {
+    background: C.panel, border: `1px solid ${C.amber}`,
+    fontFamily: '"VT323", monospace', fontSize: 13, color: C.amber,
+    borderRadius: 2,
+  };
+
+  return (
+    <>
+      <Category>Visualization</Category>
+
+      <Panel title="Fig. 1 · Survivorship curve — l(x)" defaultOpen>
+        <P style={{ fontSize: 13, color: C.textDim }}>
+          Log y-axis reveals the mortality pattern. Concave (steep early drop) =
+          Type III, most fish. Straight line = Type II, constant mortality. Convex
+          (flat then steep drop) = Type I, long-lived.
+        </P>
+        <ResponsiveContainer width="100%" height={240}>
+          <LineChart data={rows} margin={{ top: 10, right: 20, left: 10, bottom: 20 }}>
+            <CartesianGrid stroke={C.panelBorder} strokeDasharray="2 4"/>
+            <XAxis dataKey="x" {...axis}
+              label={{ value: "age x (years)", position: "insideBottom",
+                offset: -4, fill: C.textDim, fontSize: 11,
+                fontFamily: '"VT323", monospace' }}/>
+            <YAxis {...axis} scale="log" domain={[0.01, 1]}
+              ticks={[0.01, 0.1, 1]} tickFormatter={(v) => v.toString()}
+              label={{ value: "l(x)  [log]", angle: -90,
+                position: "insideLeft", fill: C.textDim, fontSize: 11,
+                fontFamily: '"VT323", monospace' }}/>
+            <Tooltip contentStyle={tip}
+              formatter={(v) => typeof v === "number" ? v.toFixed(3) : v}/>
+            <Line type="monotone" dataKey="lx" stroke={C.amber}
+              strokeWidth={2.5} dot={{ fill: C.amber, r: 4 }}
+              activeDot={{ r: 6, fill: C.amberBright }} name="l(x)"/>
+          </LineChart>
+        </ResponsiveContainer>
+      </Panel>
+
+      <Panel title="Fig. 2 · Mortality rate — q(x)" defaultOpen>
+        <P style={{ fontSize: 13, color: C.textDim }}>
+          The probability of dying in each year of life. Normal pattern is high in
+          the first year (egg/larval mortality), low during juvenile/subadult years,
+          climbing back up at senescence.
+        </P>
+        <ResponsiveContainer width="100%" height={220}>
+          <BarChart data={rows} margin={{ top: 10, right: 20, left: 10, bottom: 20 }}>
+            <CartesianGrid stroke={C.panelBorder} strokeDasharray="2 4"/>
+            <XAxis dataKey="x" {...axis}
+              label={{ value: "age x (years)", position: "insideBottom",
+                offset: -4, fill: C.textDim, fontSize: 11,
+                fontFamily: '"VT323", monospace' }}/>
+            <YAxis {...axis} domain={[0, 1]}
+              label={{ value: "q(x)", angle: -90,
+                position: "insideLeft", fill: C.textDim, fontSize: 11,
+                fontFamily: '"VT323", monospace' }}/>
+            <Tooltip contentStyle={tip}
+              formatter={(v) => typeof v === "number" ? v.toFixed(3) : v}/>
+            <Bar dataKey="qx" fill={C.red} name="q(x)" radius={[2, 2, 0, 0]}/>
+          </BarChart>
+        </ResponsiveContainer>
+      </Panel>
+
+      <Panel title="Fig. 3 · Reproductive contribution — l(x)·b(x)" defaultOpen>
+        <P style={{ fontSize: 13, color: C.textDim }}>
+          The area under the amber curve equals R₀. Green bars are raw fecundity
+          b(x). Amber line is b(x) discounted by the survival chance l(x). Notice
+          how old fish with declining survival contribute less even if they still
+          reproduce.
+        </P>
+        <ResponsiveContainer width="100%" height={240}>
+          <ComposedChart data={rows} margin={{ top: 10, right: 20, left: 10, bottom: 20 }}>
+            <CartesianGrid stroke={C.panelBorder} strokeDasharray="2 4"/>
+            <XAxis dataKey="x" {...axis}
+              label={{ value: "age x (years)", position: "insideBottom",
+                offset: -4, fill: C.textDim, fontSize: 11,
+                fontFamily: '"VT323", monospace' }}/>
+            <YAxis {...axis}/>
+            <Tooltip contentStyle={tip}
+              formatter={(v) => typeof v === "number" ? v.toFixed(3) : v}/>
+            <Legend wrapperStyle={{ fontFamily: '"VT323", monospace',
+              fontSize: 12, color: C.textDim }}/>
+            <Area type="monotone" dataKey="lxbx" fill={C.amber}
+              fillOpacity={0.2} stroke="none" name="area = R₀"/>
+            <Bar dataKey="bt" fill={C.green} name="b(x) raw" opacity={0.5}
+              radius={[2, 2, 0, 0]}/>
+            <Line type="monotone" dataKey="lxbx" stroke={C.amberBright}
+              strokeWidth={2.5} dot={{ fill: C.amberBright, r: 4 }}
+              name="l(x)·b(x)"/>
+          </ComposedChart>
+        </ResponsiveContainer>
+      </Panel>
+    </>
+  );
+};
+
+// ══════════════════════════════════════════════════════════════════════
+// PAGE: INTERPRET
+// ══════════════════════════════════════════════════════════════════════
+
+const InterpretPage = ({ computed }) => {
+  const { rows, R0, T, r, lambda } = computed;
+  const peakRepro = [...rows].sort((a, b) => b.lxbx - a.lxbx)[0];
+  const ageMaturity = rows.find(r => r.bt > 0)?.x ?? "—";
+  const maxAge = rows[rows.length - 1]?.x;
+  const firstYearSurvival = rows[0]?.sx || 0;
+  const oldestCohortSurvival = rows[rows.length - 1]?.lx || 0;
+
+  const verdict =
+    R0 > 1.5 ? { w: "GROWING STRONGLY", c: C.green, ic: "▲▲" } :
+    R0 > 1.0 ? { w: "GROWING",          c: C.green, ic: "▲" } :
+    R0 === 1 ? { w: "STABLE",           c: C.amber, ic: "═" } :
+    R0 > 0   ? { w: "DECLINING",        c: C.red,   ic: "▼" } :
+               { w: "COLLAPSING",       c: C.red,   ic: "▼▼" };
+
+  const projection = [];
+  for (let t = 0; t <= 10; t++) {
+    projection.push({ year: t, N: Math.round(1000 * Math.exp(r * t)) });
+  }
+
+  return (
+    <>
+      <Category>Diagnosis</Category>
+
+      <Panel title="Headline · Population status" defaultOpen status={verdict.w}>
+        <div style={{
+          background: "rgba(0,0,0,0.3)", padding: "18px 20px",
+          border: `1px solid ${verdict.c}`, borderLeft: `4px solid ${verdict.c}`,
+          borderRadius: 2, marginBottom: 14,
+        }}>
+          <div style={{ fontFamily: '"VT323", monospace', fontSize: 13,
+            color: verdict.c, letterSpacing: "0.2em", marginBottom: 6 }}>
+            ▸ STATUS: {verdict.ic}
+          </div>
+          <div style={{ fontFamily: '"VT323", monospace', fontSize: 28,
+            color: verdict.c, letterSpacing: "0.08em", lineHeight: 1.1 }}>
+            POPULATION IS {verdict.w}
+          </div>
+        </div>
+        <P>
+          Each female produces, on average,{" "}
+          <strong style={{ color: C.amberBright }}>{R0.toFixed(2)}</strong>{" "}
+          female offspring in her lifetime. With a generation time of{" "}
+          <strong style={{ color: C.amberBright }}>{T.toFixed(1)} years</strong>,
+          the intrinsic growth rate is{" "}
+          <strong style={{ color: C.amberBright }}>r = {r.toFixed(3)} per year</strong>,
+          meaning population size multiplies by{" "}
+          <strong style={{ color: C.amberBright }}>{lambda.toFixed(2)}×</strong>{" "}
+          annually.
+        </P>
+      </Panel>
+
+      <Panel title="Life history findings" defaultOpen>
+        <div style={{ display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 12 }}>
+          <FindingBox label="AGE AT FIRST REPRO"
+            value={`${ageMaturity} yr`}
+            note={typeof ageMaturity === "number" && ageMaturity >= 4
+              ? "delayed maturity" : "early maturity"}/>
+          <FindingBox label="PEAK REPRO AGE"
+            value={peakRepro ? `${peakRepro.x} yr` : "—"}
+            note={peakRepro ? `contributes ${peakRepro.lxbx.toFixed(2)} to R₀` : ""}/>
+          <FindingBox label="MAX OBSERVED AGE"
+            value={`${maxAge} yr`}
+            note={`${(oldestCohortSurvival * 100).toFixed(1)}% reach this age`}/>
+          <FindingBox label="FIRST-YEAR SURVIVAL"
+            value={`${(firstYearSurvival * 100).toFixed(1)}%`}
+            note={firstYearSurvival < 0.5 ? "high juvenile mortality" : "strong early survival"}/>
+        </div>
+      </Panel>
+
+      <Panel title="Fig. 4 · 10-year projection" defaultOpen>
+        <P style={{ fontSize: 13, color: C.textDim }}>
+          Exponential model N(t) = 1000·e^({r.toFixed(3)}·t) assuming current vital
+          rates hold constant. Real stocks rarely grow this cleanly — density
+          dependence, environment, and fishing all kick in — but it's a useful
+          "what if nothing changes" scenario.
+        </P>
+        <ResponsiveContainer width="100%" height={240}>
+          <LineChart data={projection} margin={{ top: 10, right: 20, left: 10, bottom: 20 }}>
+            <CartesianGrid stroke={C.panelBorder} strokeDasharray="2 4"/>
+            <XAxis dataKey="year"
+              stroke={C.textDim}
+              tick={{ fill: C.text, fontSize: 12, fontFamily: '"VT323", monospace' }}
+              label={{ value: "years into future", position: "insideBottom",
+                offset: -4, fill: C.textDim, fontSize: 11,
+                fontFamily: '"VT323", monospace' }}/>
+            <YAxis stroke={C.textDim}
+              tick={{ fill: C.text, fontSize: 12, fontFamily: '"VT323", monospace' }}/>
+            <Tooltip contentStyle={{ background: C.panel, border: `1px solid ${C.amber}`,
+              fontFamily: '"VT323", monospace', fontSize: 13, color: C.amber }}/>
+            <Line type="monotone" dataKey="N" stroke={C.green}
+              strokeWidth={2.5} dot={{ fill: C.green, r: 4 }} name="N(t)"/>
+          </LineChart>
+        </ResponsiveContainer>
+      </Panel>
+
+      <Panel title="Management levers · What to try">
+        <P>
+          Life tables turn abstract management decisions into concrete number
+          changes. Go to Calculate and try editing:
+        </P>
+        <div style={{ display: "grid", gap: 10 }}>
+          <Lever t="Raise a minimum-size limit"
+            e="Reduce q(x) for the youngest legal sizes. Watch R₀ climb as more fish survive to spawn."/>
+          <Lever t="Open a spawning-season fishery"
+            e="Cut b(x) at peak reproductive ages. Even small cuts to the middle of the b(x) column crater R₀."/>
+          <Lever t="Introduce a slot limit (protect big old spawners)"
+            e="Keep l(x) high at ages 5–7. These fish are the biggest contributors to R₀."/>
+          <Lever t="Improve juvenile habitat"
+            e="Raise N(1), N(2), N(3). Because survival compounds, boosting juvenile survival is often the highest-leverage intervention."/>
+        </div>
+      </Panel>
+    </>
+  );
+};
+
+const FindingBox = ({ label, value, note }) => (
+  <div style={{
+    background: "rgba(0,0,0,0.25)", border: `1px solid ${C.panelBorder}`,
+    borderLeft: `3px solid ${C.cyan}`, padding: "12px 14px", borderRadius: 2,
+  }}>
+    <div style={{ fontFamily: '"VT323", monospace', fontSize: 11,
+      color: C.cyan, letterSpacing: "0.2em", marginBottom: 4 }}>{label}</div>
+    <div style={{ fontFamily: '"VT323", monospace', fontSize: 22,
+      color: C.amberBright, letterSpacing: "0.04em" }}>{value}</div>
+    <div style={{ fontFamily: '"VT323", monospace', fontSize: 12,
+      color: C.textDim, marginTop: 4, letterSpacing: "0.05em" }}>{note}</div>
+  </div>
+);
+
+const Lever = ({ t, e }) => (
+  <div style={{ padding: "10px 14px",
+    background: "rgba(232,195,90,0.04)",
+    borderLeft: `2px solid ${C.amber}`, borderRadius: 2 }}>
+    <div style={{ fontFamily: '"VT323", monospace', fontSize: 15,
+      color: C.amber, letterSpacing: "0.06em", marginBottom: 3 }}>
+      ▸ {t}
+    </div>
+    <div style={{ fontFamily: '"IBM Plex Sans", sans-serif', fontSize: 13,
+      color: C.text, lineHeight: 1.5 }}>{e}</div>
+  </div>
+);
+
+// ══════════════════════════════════════════════════════════════════════
+// MAIN APP
+// ══════════════════════════════════════════════════════════════════════
+
+const PAGES = [
+  { id: "learn",     label: "Reference" },
+  { id: "calc",      label: "Table" },
+  { id: "curves",    label: "Curves" },
+  { id: "interpret", label: "Diagnose" },
+];
+
+export default function App() {
+  const [page, setPage] = useState("learn");
+  const [rawData, setRawData] = useState(INITIAL_DATA.map(r => ({ ...r })));
+  const computed = useMemo(() => computeLifeTable(rawData), [rawData]);
+
+  const R0Display = computed.R0.toFixed(2);
+
+  return (
+    <div style={{
+      minHeight: "100vh",
+      background: `
+        radial-gradient(ellipse at 20% 15%, ${C.bg2} 0%, ${C.bg1} 25%, ${C.bg0} 60%, #051520 100%)
+      `,
+      fontFamily: '"IBM Plex Sans", "Helvetica Neue", sans-serif',
+      color: C.text, position: "relative",
+      paddingBottom: 70,
+    }}>
+      {/* Font imports */}
+      <link rel="preconnect" href="https://fonts.googleapis.com"/>
+      <link href="https://fonts.googleapis.com/css2?family=VT323&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet"/>
+
+      <style>{`
+        input[type="number"]::-webkit-outer-spin-button,
+        input[type="number"]::-webkit-inner-spin-button {
+          -webkit-appearance: none; margin: 0;
+        }
+        input[type="number"] { -moz-appearance: textfield; }
+        *::selection { background: ${C.amber}; color: ${C.bg0}; }
+        body { margin: 0; }
+      `}</style>
+
+      {/* Floating particle dots — subtle atmospheric detail */}
+      <svg style={{
+        position: "absolute", top: 0, left: 0, width: "100%", height: "100%",
+        pointerEvents: "none", opacity: 0.4,
+      }}>
+        {Array.from({ length: 24 }).map((_, i) => {
+          const seed = i * 137.5;
+          const x = (seed * 7.3) % 100;
+          const y = (seed * 11.7) % 100;
+          const s = 0.5 + ((seed * 3.1) % 2);
+          return <circle key={i} cx={`${x}%`} cy={`${y}%`} r={s}
+            fill="rgba(180,220,255,0.5)"/>;
+        })}
+      </svg>
+
+      {/* Top status bar */}
+      <header style={{
+        position: "relative", zIndex: 2,
+        padding: "16px 24px 10px",
+        display: "flex", justifyContent: "space-between", alignItems: "flex-start",
+        borderTop: `3px solid ${C.amber}`,
+        borderBottom: `1px solid ${C.panelBorder}`,
+      }}>
+        <div>
+          <div style={{
+            fontFamily: '"VT323", monospace', fontSize: 22,
+            color: C.text, letterSpacing: "0.1em", fontWeight: 400,
+          }}>COHORTLOG 1.0</div>
+          <div style={{
+            display: "inline-block", marginTop: 8,
+            padding: "4px 10px",
+            border: `1px solid ${C.panelBorder}`,
+            background: "rgba(0,0,0,0.3)",
+            fontFamily: '"VT323", monospace', fontSize: 12,
+            color: C.textDim, letterSpacing: "0.15em",
+          }}>
+            {rawData.length} AGE CLASSES · R₀ = {R0Display}
+          </div>
+        </div>
+        <div style={{
+          padding: "4px 10px",
+          border: `1px solid ${C.panelBorder}`,
+          background: "rgba(0,0,0,0.3)",
+          fontFamily: '"VT323", monospace', fontSize: 12,
+          color: C.text, letterSpacing: "0.2em",
+        }}>
+          {computed.R0 > 1 ? "GROWING" : computed.R0 < 1 ? "DECLINING" : "STABLE"}
+        </div>
+      </header>
+
+      {/* Content */}
+      <main style={{
+        position: "relative", zIndex: 2,
+        maxWidth: 860, margin: "0 auto", padding: "20px 20px 40px",
+      }}>
+        {page === "learn"     && <LearnPage/>}
+        {page === "calc"      && <CalcPage rawData={rawData}
+                                    setRawData={setRawData} computed={computed}/>}
+        {page === "curves"    && <CurvesPage computed={computed}/>}
+        {page === "interpret" && <InterpretPage computed={computed}/>}
+      </main>
+
+      {/* Bottom tab bar */}
+      <nav style={{
+        position: "fixed", bottom: 0, left: 0, right: 0,
+        display: "grid",
+        gridTemplateColumns: `repeat(${PAGES.length}, 1fr)`,
+        background: C.bg1, borderTop: `1px solid ${C.panelBorder}`,
+        zIndex: 10,
+      }}>
+        {PAGES.map((p) => {
+          const active = page === p.id;
+          return (
+            <button key={p.id} onClick={() => setPage(p.id)}
+              style={{
+                padding: "14px 8px",
+                background: active ? C.tabBlueActive : C.tabBlue,
+                border: "none",
+                borderRight: `1px solid ${C.panelBorder}`,
+                cursor: "pointer",
+                fontFamily: '"IBM Plex Sans", sans-serif',
+                fontSize: 13, color: active ? "#fff" : "rgba(255,255,255,0.85)",
+                fontWeight: active ? 600 : 400,
+                letterSpacing: "0.02em",
+                transition: "background 120ms",
+              }}
+            >{p.label}</button>
+          );
+        })}
+      </nav>
+    </div>
+  );
+}
