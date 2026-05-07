@@ -3,18 +3,19 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>COHORTLOG 1.0 — Life Table Analysis</title>
+<title>COHORTLOG 1.2 — Life Table Analysis</title>
+<meta name="description" content="Interactive life table analysis tool for fisheries demography. Calculate R₀, generation time, and intrinsic rate of increase from cohort survival and fecundity data.">
+<meta name="author" content="Michael Stocklin">
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=VT323&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
 
-<!-- React 18 + Recharts + Babel (standalone) from CDN -->
-<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-<script crossorigin src="https://unpkg.com/prop-types@15/prop-types.min.js"></script>
+<script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/prop-types@15.8.1/prop-types.min.js"></script>
 <script crossorigin src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script crossorigin src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
 
 <style>
   html, body { margin: 0; padding: 0; background: #051520; }
@@ -26,1002 +27,195 @@
   #loading {
     position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
     background: #051520; color: #e8c35a; font-family: "VT323", monospace; font-size: 22px;
-    letter-spacing: 0.15em; z-index: 100;
+    letter-spacing: 0.15em; z-index: 100; flex-direction: column; gap: 10px;
   }
   #loading .blink { animation: blink 1s steps(2) infinite; }
+  #loading .err { color: #d87060; font-size: 13px; max-width: 380px; text-align: center; }
   @keyframes blink { 50% { opacity: 0.3; } }
+  button { -webkit-tap-highlight-color: transparent; }
+  button:focus-visible { outline: 2px solid #e8c35a; outline-offset: 2px; }
+  input:focus-visible { border-color: #e8c35a !important; }
+
+  @keyframes bubbleRise {
+    0%   { transform: translateY(0)      translateX(0); opacity: 0; }
+    8%   { opacity: 1; }
+    92%  { opacity: 1; }
+    100% { transform: translateY(-110vh) translateX(0); opacity: 0; }
+  }
+  @keyframes bubbleWobble {
+    0%   { margin-left: 0; }
+    100% { margin-left: var(--wobble, 20px); }
+  }
+  @keyframes tutorialPulse {
+    0%, 100% { box-shadow: 0 0 20px rgba(232,195,90,0.6), inset 0 0 20px rgba(232,195,90,0.15); }
+    50%      { box-shadow: 0 0 30px rgba(232,195,90,0.9), inset 0 0 25px rgba(232,195,90,0.25); }
+  }
+
+  @media (max-width: 480px) {
+    header > div > div:first-child { font-size: 18px !important; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; }
+  }
+  @media print {
+    nav, footer { display: none !important; }
+    button { display: none; }
+  }
 </style>
 </head>
 <body>
-<div id="loading">&gt; BOOTING COHORTLOG<span class="blink">_</span></div>
+<div id="loading">
+  <div>&gt; BOOTING COHORTLOG<span class="blink">_</span></div>
+  <div id="loading-err" class="err" style="display:none"></div>
+</div>
 <div id="root"></div>
 
-<script type="text/babel" data-presets="react">
-const { useState, useMemo, useEffect } = React;
-const {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, BarChart, Bar, ComposedChart, Area, Legend,
-} = Recharts;
+<script>
+(function bootstrap() {
+  var maxWait = 10000;
+  var startedAt = Date.now();
+  var errEl = document.getElementById("loading-err");
 
-// ── Initial field data ───────────────────────────────────────────────
-const INITIAL_DATA = [
-  { x: 0, Nt: 1000, bt: 0 },
-  { x: 1, Nt: 930,  bt: 0 },
-  { x: 2, Nt: 920,  bt: 0 },
-  { x: 3, Nt: 880,  bt: 0 },
-  { x: 4, Nt: 860,  bt: 2 },
-  { x: 5, Nt: 840,  bt: 4 },
-  { x: 6, Nt: 710,  bt: 4 },
-  { x: 7, Nt: 450,  bt: 3 },
-  { x: 8, Nt: 230,  bt: 1 },
-  { x: 9, Nt: 50,   bt: 0 },
-];
-
-// ── Core math ────────────────────────────────────────────────────────
-function computeLifeTable(rows) {
-  const N0 = rows[0]?.Nt || 1;
-  const out = rows.map((r, i) => {
-    const next = rows[i + 1];
-    const Nt1 = next ? next.Nt : 0;
-    const lx = r.Nt / N0;
-    const dx = r.Nt - Nt1;
-    const qx = r.Nt > 0 ? dx / r.Nt : 0;
-    const sx = r.Nt > 0 ? Nt1 / r.Nt : 0;
-    const lxbx = lx * r.bt;
-    const xlxbx = r.x * lxbx;
-    return { ...r, lx, dx, qx, sx, lxbx, xlxbx };
-  });
-  const R0 = out.reduce((s, r) => s + r.lxbx, 0);
-  const sumXlxbx = out.reduce((s, r) => s + r.xlxbx, 0);
-  const T = R0 > 0 ? sumXlxbx / R0 : 0;
-  const r = R0 > 0 ? Math.log(R0) / T : 0;
-  const lambda = Math.exp(r);
-  return { rows: out, R0, T, r, lambda, sumXlxbx };
-}
-
-// ── Palette ──────────────────────────────────────────────────────────
-const C = {
-  bg0: "#0a2230", bg1: "#0f3347", bg2: "#1a4a63",
-  panel: "#061520", panelBorder: "#1d4054",
-  amber: "#e8c35a", amberDim: "#b0913f", amberBright: "#f5d676",
-  text: "#d6e3ea", textDim: "#7d99a8", lineAmber: "#d4a84a",
-  cyan: "#5ecce0", red: "#d87060", green: "#6ac27a",
-  inputBg: "#0a2a3a", tabBlue: "#1a5478", tabBlueActive: "#2a729c",
-};
-
-// ── Primitives ──────────────────────────────────────────────────────
-const Category = ({ children }) => (
-  <div style={{
-    display: "flex", alignItems: "center", gap: 10,
-    marginTop: 28, marginBottom: 14, paddingLeft: 2,
-  }}>
-    <div style={{ width: 3, height: 18, background: C.amber,
-      boxShadow: `0 0 6px ${C.amber}` }}/>
-    <div style={{
-      fontFamily: '"VT323", "Courier New", monospace',
-      fontSize: 18, color: C.amber, letterSpacing: "0.18em",
-      textTransform: "uppercase", fontWeight: 400,
-    }}>{children}</div>
-  </div>
-);
-
-const Panel = ({ title, defaultOpen = false, children, status }) => {
-  const [open, setOpen] = useState(defaultOpen);
-  return (
-    <div style={{
-      background: `linear-gradient(180deg, ${C.panel} 0%, #04101a 100%)`,
-      border: `1px solid ${C.panelBorder}`, borderRadius: 3, marginBottom: 12,
-      boxShadow: "inset 0 1px 0 rgba(255,255,255,0.03), 0 2px 8px rgba(0,0,0,0.3)",
-      overflow: "hidden",
-    }}>
-      <button onClick={() => setOpen(!open)} style={{
-        width: "100%", display: "flex", alignItems: "center",
-        justifyContent: "space-between", padding: "14px 18px",
-        background: "transparent", border: "none", cursor: "pointer",
-        borderBottom: open ? `1px solid ${C.panelBorder}` : "none",
-      }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <span style={{
-            color: C.amber, fontFamily: '"VT323", monospace', fontSize: 18,
-            transform: open ? "rotate(90deg)" : "rotate(0deg)",
-            transition: "transform 160ms", display: "inline-block",
-          }}>&gt;</span>
-          <span style={{
-            fontFamily: '"VT323", "Courier New", monospace',
-            fontSize: 17, color: C.amber, letterSpacing: "0.14em",
-            textTransform: "uppercase", textAlign: "left",
-          }}>{title}</span>
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          {status && (
-            <span style={{
-              fontFamily: '"VT323", monospace', fontSize: 12,
-              color: C.textDim, letterSpacing: "0.15em",
-            }}>{status}</span>
-          )}
-          <span style={{ color: C.amberDim, fontFamily: "monospace", fontSize: 11 }}>▸</span>
-        </div>
-      </button>
-      {open && <div style={{ padding: "16px 20px 20px" }}>{children}</div>}
-    </div>
-  );
-};
-
-const P = ({ children, style }) => (
-  <p style={{
-    fontFamily: '"IBM Plex Sans", "Helvetica Neue", sans-serif',
-    fontSize: 14, lineHeight: 1.65, color: C.text, margin: "0 0 12px",
-    ...style,
-  }}>{children}</p>
-);
-
-const Term = ({ children }) => (
-  <span style={{
-    fontFamily: '"VT323", monospace', fontSize: 16,
-    color: C.amber, letterSpacing: "0.05em",
-  }}>{children}</span>
-);
-
-const Formula = ({ children, note }) => (
-  <div style={{
-    background: "rgba(232,195,90,0.06)",
-    border: `1px solid rgba(232,195,90,0.3)`,
-    borderLeft: `3px solid ${C.amber}`,
-    padding: "12px 16px", margin: "10px 0", borderRadius: 2,
-  }}>
-    <div style={{
-      fontFamily: '"VT323", monospace', fontSize: 18,
-      color: C.amberBright, letterSpacing: "0.04em",
-    }}>{children}</div>
-    {note && (
-      <div style={{
-        fontFamily: '"IBM Plex Sans", sans-serif', fontSize: 12,
-        color: C.textDim, marginTop: 6, fontStyle: "italic",
-      }}>{note}</div>
-    )}
-  </div>
-);
-
-const Example = ({ children }) => (
-  <div style={{
-    background: "rgba(94,204,224,0.05)",
-    border: `1px solid rgba(94,204,224,0.25)`,
-    borderLeft: `3px solid ${C.cyan}`,
-    padding: "12px 16px", margin: "12px 0", borderRadius: 2,
-  }}>
-    <div style={{
-      fontFamily: '"VT323", monospace', fontSize: 12,
-      color: C.cyan, letterSpacing: "0.2em", marginBottom: 6,
-    }}>▸ WORKED EXAMPLE</div>
-    <div style={{
-      fontFamily: '"IBM Plex Sans", sans-serif', fontSize: 13.5,
-      color: C.text, lineHeight: 1.6,
-    }}>{children}</div>
-  </div>
-);
-
-const MiniHead = ({ children }) => (
-  <div style={{
-    fontFamily: '"VT323", monospace', fontSize: 13,
-    color: C.amberDim, letterSpacing: "0.2em", textTransform: "uppercase",
-    marginBottom: 8, marginTop: 16,
-  }}>// {children}</div>
-);
-
-// ══════════════════════════════════════════════════════════════════
-// LEARN PAGE
-// ══════════════════════════════════════════════════════════════════
-const LearnPage = () => (
-  <>
-    <Category>What is a life table?</Category>
-
-    <Panel title="START HERE · The one-paragraph version" defaultOpen status="BEGINNER">
-      <P>
-        A life table is a simple bookkeeping sheet. You follow a group of fish all born
-        in the same year (a <Term>cohort</Term>), count how many are still alive at each
-        birthday, and write down how many offspring the survivors produce. From just
-        those two columns of field data, you can calculate whether the population is
-        growing, shrinking, or holding steady — and how fast.
-      </P>
-      <P style={{ color: C.textDim, margin: 0 }}>
-        Everything else in this app is unpacking that one idea.
-      </P>
-    </Panel>
-
-    <Panel title="Why fisheries biologists use them" status="BEGINNER">
-      <P>
-        Fisheries management needs to know if current fishing pressure is sustainable.
-        Catch curves tell you the mortality rate, but only a life table combines
-        mortality with reproduction, so you can answer the real question:{" "}
-        <em style={{ color: C.amberBright }}>are enough new fish being produced to
-        replace the ones being removed?</em>
-      </P>
-      <P>
-        Every management lever — minimum size limits, closed seasons, slot limits —
-        changes a specific column of the life table. Once you see how the columns
-        connect, the effects of each policy become obvious.
-      </P>
-    </Panel>
-
-    <Panel title="Cohort vs. Static tables — two ways to build one">
-      <MiniHead>Cohort (dynamic)</MiniHead>
-      <P>
-        Tag 1,000 fry, come back every year, count how many are left. Clean data,
-        but it takes a decade and you'll lose most of your tags. Rare in wild fish
-        studies, common in hatchery work.
-      </P>
-      <MiniHead>Static (time-specific)</MiniHead>
-      <P>
-        One big sample, one afternoon. Age every fish you catch (otoliths, scales),
-        then <em>assume</em> the age distribution you see represents what happens to
-        a single cohort over time. Easier, but relies on the stable-age-distribution
-        assumption.
-      </P>
-      <P style={{ color: C.textDim, fontSize: 13 }}>
-        The data in this app is cohort-format: N(t) decreases every year because
-        we're following the same 1,000 fish shrinking over time.
-      </P>
-    </Panel>
-
-    <Category>The columns, one by one</Category>
-
-    <Panel title="x — Age class" defaultOpen status="INPUT">
-      <P>
-        Age in years. Row 0 is the first year of life (ages 0 to 1). The rest follow
-        sequentially. Could also be months or life stages (egg, larva, juvenile,
-        adult) for species where age is hard to measure.
-      </P>
-      <Example>
-        Our fish live to a maximum age of 9 years, so x runs from 0 to 9.
-      </Example>
-    </Panel>
-
-    <Panel title="N(t) — Number alive at age x" status="INPUT · FIELD DATA">
-      <P>
-        How many of the original cohort are still alive at the start of age x.
-        This is observed data — the raw counts from your field surveys.
-      </P>
-      <P>
-        N(t) always starts high and decreases. The starting value N(0) is arbitrary
-        (often set to 1,000 for easy mental math), since the life table analyzes
-        <em> proportions</em>, not absolute numbers.
-      </P>
-      <Example>
-        In our data, N(0) = 1000 fish. By age 5, only N(5) = 840 are still alive.
-        By age 9, just 50 remain.
-      </Example>
-    </Panel>
-
-    <Panel title="b(t) — Fecundity" status="INPUT · FIELD DATA">
-      <P>
-        Average number of <strong>female</strong> offspring produced per female at
-        age x, per year. Also observed data.
-      </P>
-      <P>
-        Why only females? Because females are the bottleneck on population growth —
-        males can fertilize many females. If sex ratio is 1:1, the answer ends up the
-        same either way. You'll also see this written as <Term>m(x)</Term> in some
-        textbooks; it means exactly the same thing.
-      </P>
-      <P>
-        b(t) is usually 0 before maturity, rises to a peak in prime reproductive
-        years, then may decline in old age.
-      </P>
-      <Example>
-        In our data, no fish reproduce before age 4. Peak fecundity is 4 female
-        offspring per female per year, happening at ages 5 and 6.
-      </Example>
-    </Panel>
-
-    <Panel title="l(x) — Survivorship (DERIVED)">
-      <Formula note="Proportion of original cohort still alive at age x. Always starts at 1.">
-        l(x) = N(x) / N(0)
-      </Formula>
-      <P>
-        This is N(t) normalized so it starts at 1. Makes it comparable across
-        species and studies with different starting counts.
-      </P>
-      <Example>
-        At age 5: l(5) = 840 / 1000 = <strong style={{ color: C.amberBright }}>0.840</strong>.{" "}
-        So 84% of the cohort made it to their fifth birthday.
-        <br/><br/>
-        At age 9: l(9) = 50 / 1000 = <strong style={{ color: C.amberBright }}>0.050</strong>.{" "}
-        Only 5% survive to maximum age.
-      </Example>
-    </Panel>
-
-    <Panel title="d(x) — Number dying in interval (DERIVED)">
-      <Formula note="Deaths between age x and x+1.">
-        d(x) = N(x) − N(x+1)
-      </Formula>
-      <P>The raw count of fish that died during that year of life.</P>
-      <Example>
-        At age 5: d(5) = N(5) − N(6) = 840 − 710 = <strong style={{ color: C.amberBright }}>130 fish</strong>{" "}
-        died between their 5th and 6th birthdays.
-      </Example>
-    </Panel>
-
-    <Panel title="q(x) — Age-specific mortality rate (DERIVED)">
-      <Formula note="The proportion of fish alive at age x that die before age x+1.">
-        q(x) = d(x) / N(x)
-      </Formula>
-      <P>
-        The probability a fish alive at age x will die during that year. Always
-        between 0 and 1. In the final row, q(x) = 1 because everyone left dies
-        during the last interval.
-      </P>
-      <Example>
-        At age 5: q(5) = 130 / 840 = <strong style={{ color: C.amberBright }}>0.155</strong>.{" "}
-        A 5-year-old fish has a 15.5% chance of not making it to age 6.
-        <br/><br/>
-        At age 7: q(7) = 220 / 450 = <strong style={{ color: C.amberBright }}>0.489</strong>.{" "}
-        Almost half of all 7-year-olds die during the year.
-      </Example>
-    </Panel>
-
-    <Panel title="l(x)·b(x) — Reproductive contribution (DERIVED)">
-      <Formula note="Survival probability × fecundity at age x.">
-        l(x)·b(x)
-      </Formula>
-      <P>
-        Expected female offspring a <em>newborn</em> from the cohort will produce when
-        she reaches age x — accounting for the fact that she might not make it.
-      </P>
-      <P>
-        This is the key column. A fish that lays 1,000 eggs is useless to the
-        population if only 1% survive to lay them. l(x)·b(x) handles that discount.
-      </P>
-      <Example>
-        At age 5: l(5)·b(5) = 0.840 × 4 = <strong style={{ color: C.amberBright }}>3.36</strong>.{" "}
-        On average, a newborn in this cohort is expected to produce 3.36 offspring
-        specifically at her 5th birthday.
-      </Example>
-    </Panel>
-
-    <Panel title="x·l(x)·b(x) — Age-weighted contribution (DERIVED)">
-      <Formula note="Reproductive contribution multiplied by the age at which it happens.">
-        x · l(x) · b(x)
-      </Formula>
-      <P>
-        Used only for calculating generation time. You can skip to the next section
-        if you don't care where T comes from.
-      </P>
-      <Example>
-        At age 5: 5 × 0.840 × 4 = <strong style={{ color: C.amberBright }}>16.80</strong>.
-        <br/>
-        At age 6: 6 × 0.710 × 4 = <strong style={{ color: C.amberBright }}>17.04</strong>.
-        <br/>
-        The 6-year-olds contribute more to the sum even though they produce the same
-        per-capita output — because they're older.
-      </Example>
-    </Panel>
-
-    <Category>The three big metrics</Category>
-
-    <Panel title="R₀ — Net reproductive rate (the headline number)" defaultOpen status="KEY METRIC">
-      <Formula note="Sum the l(x)·b(x) column. That's it.">
-        R₀ = Σ l(x) · b(x)
-      </Formula>
-      <P>
-        The average number of female offspring each female produces over her entire
-        lifetime, already adjusted for the chance she dies before reproducing.
-      </P>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
-        gap: 8, margin: "12px 0" }}>
-        <div style={{ padding: 10, background: "rgba(106,194,122,0.08)",
-          border: `1px solid ${C.green}`, borderRadius: 2 }}>
-          <div style={{ fontFamily: '"VT323", monospace', color: C.green, fontSize: 15 }}>R₀ &gt; 1</div>
-          <div style={{ fontSize: 12, color: C.text, marginTop: 4 }}>
-            Growing. Each female more than replaces herself.
-          </div>
-        </div>
-        <div style={{ padding: 10, background: "rgba(232,195,90,0.08)",
-          border: `1px solid ${C.amber}`, borderRadius: 2 }}>
-          <div style={{ fontFamily: '"VT323", monospace', color: C.amber, fontSize: 15 }}>R₀ = 1</div>
-          <div style={{ fontSize: 12, color: C.text, marginTop: 4 }}>Stable. Exact replacement.</div>
-        </div>
-        <div style={{ padding: 10, background: "rgba(216,112,96,0.08)",
-          border: `1px solid ${C.red}`, borderRadius: 2 }}>
-          <div style={{ fontFamily: '"VT323", monospace', color: C.red, fontSize: 15 }}>R₀ &lt; 1</div>
-          <div style={{ fontSize: 12, color: C.text, marginTop: 4 }}>
-            Declining. Not enough offspring to replace adults.
-          </div>
-        </div>
-      </div>
-      <Example>
-        Our data: R₀ = 0 + 0 + 0 + 0 + 1.72 + 3.36 + 2.84 + 1.35 + 0.23 + 0 ={" "}
-        <strong style={{ color: C.amberBright }}>9.50</strong>
-        <br/><br/>
-        Each female in this population produces an average of 9.5 female offspring in
-        her lifetime. This stock is thriving.
-      </Example>
-    </Panel>
-
-    <Panel title="T — Generation time" status="KEY METRIC">
-      <Formula note="Mean age at which mothers produce offspring.">
-        T = Σ x · l(x) · b(x)  /  R₀
-      </Formula>
-      <P>
-        The average age of a mother when her offspring are born. A weighted mean
-        where the weights are reproductive contributions.
-      </P>
-      <P>
-        Short T = fast-turnover species (anchovies, minnows). Long T = slow-turnover
-        species (sturgeon, rockfish). Matters because populations with long T are
-        much slower to recover from depletion.
-      </P>
-      <Example>
-        Our data: T = 52.01 / 9.50 = <strong style={{ color: C.amberBright }}>5.47 years</strong>.
-        <br/><br/>
-        On average, mothers in this population produce offspring when they are
-        about 5.5 years old.
-      </Example>
-    </Panel>
-
-    <Panel title="r — Intrinsic rate of increase" status="KEY METRIC">
-      <Formula note="Approximation. Exact solution requires the Euler–Lotka equation.">
-        r ≈ ln(R₀) / T
-      </Formula>
-      <P>
-        The per-capita growth rate in continuous time. Plug into N(t) = N₀·eʳᵗ to
-        project population size forward.
-      </P>
-      <P>
-        r and R₀ tell you the same story in different units. R₀ measures growth
-        per generation. r measures growth per year. For management decisions on an
-        annual basis (quotas, seasons), r is usually more useful.
-      </P>
-      <Example>
-        Our data: r = ln(9.50) / 5.47 = 2.251 / 5.47 ={" "}
-        <strong style={{ color: C.amberBright }}>0.411 per year</strong>.
-        <br/><br/>
-        At this rate, population size grows by about 41% per year (continuous compounding).
-      </Example>
-    </Panel>
-
-    <Panel title="λ — Finite rate of increase (bonus)">
-      <Formula note="Annual multiplier. λ = e^r.">λ = e^r</Formula>
-      <P>
-        Some textbooks prefer λ (lambda) to r. Same information, different packaging.
-        λ = 1.5 means the population multiplies by 1.5× each year.
-      </P>
-      <Example>
-        Our data: λ = e^0.411 = <strong style={{ color: C.amberBright }}>1.509</strong>.
-        Population size is multiplied by about 1.5× per year.
-      </Example>
-    </Panel>
-  </>
-);
-
-// ══════════════════════════════════════════════════════════════════
-// CALCULATE PAGE
-// ══════════════════════════════════════════════════════════════════
-const tdCell = (color) => ({
-  padding: "8px 6px", textAlign: "center", color,
-  letterSpacing: "0.05em", borderRight: `1px solid ${C.panelBorder}`,
-});
-const inputStyle = {
-  width: 64, background: C.inputBg, border: `1px solid ${C.panelBorder}`,
-  color: C.amberBright, fontFamily: '"VT323", monospace', fontSize: 15,
-  textAlign: "center", padding: "3px 4px", borderRadius: 2,
-  letterSpacing: "0.05em", outline: "none",
-};
-
-const MetricBox = ({ symbol, label, value, note, noteColor = C.textDim }) => (
-  <div style={{
-    background: "rgba(0,0,0,0.25)", border: `1px solid ${C.panelBorder}`,
-    borderLeft: `3px solid ${C.amber}`, padding: "12px 14px", borderRadius: 2,
-  }}>
-    <div style={{ display: "flex", justifyContent: "space-between",
-      alignItems: "baseline", marginBottom: 4 }}>
-      <span style={{ fontFamily: '"VT323", monospace', fontSize: 26,
-        color: C.amberBright }}>{symbol}</span>
-      <span style={{ fontFamily: '"VT323", monospace', fontSize: 11,
-        color: C.textDim, letterSpacing: "0.15em" }}>{label}</span>
-    </div>
-    <div style={{ fontFamily: '"VT323", monospace', fontSize: 24,
-      color: C.amber, letterSpacing: "0.03em" }}>{value}</div>
-    <div style={{ fontFamily: '"VT323", monospace', fontSize: 12,
-      color: noteColor, letterSpacing: "0.08em", marginTop: 4 }}>{note}</div>
-  </div>
-);
-
-const CalcPage = ({ rawData, setRawData, computed }) => {
-  const { rows, R0, T, r: rRate, lambda } = computed;
-
-  const updateCell = (i, field, val) => {
-    const n = parseFloat(val);
-    const copy = [...rawData];
-    copy[i] = { ...copy[i], [field]: isNaN(n) ? 0 : Math.max(0, n) };
-    setRawData(copy);
-  };
-  const reset = () => setRawData(INITIAL_DATA.map(r => ({ ...r })));
-  const fmt = (v, d = 3) =>
-    v === 0 ? "—" : (typeof v === "number" && isFinite(v) ? v.toFixed(d) : "—");
-
-  return (
-    <>
-      <Category>Working sheet</Category>
-
-      <Panel title="Input data · N(t) and b(t)" defaultOpen status="EDITABLE">
-        <P>
-          Edit the two yellow columns. All other columns recalculate automatically.
-          The field data here is a salmonid-like dataset of 1,000 fry tracked to senescence.
-        </P>
-
-        <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
-          <button onClick={reset} style={{
-            fontFamily: '"VT323", monospace', fontSize: 14,
-            letterSpacing: "0.1em", textTransform: "uppercase",
-            background: "transparent", color: C.amber,
-            border: `1px solid ${C.amber}`,
-            padding: "6px 14px", cursor: "pointer", borderRadius: 2,
-          }}>&gt; RESET TO ORIGINAL</button>
-        </div>
-
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse",
-            fontFamily: '"VT323", monospace', fontSize: 15, minWidth: 640 }}>
-            <thead>
-              <tr style={{ background: "rgba(232,195,90,0.08)",
-                borderTop: `1px solid ${C.amber}`,
-                borderBottom: `1px solid ${C.amber}` }}>
-                {[
-                  ["x", C.amber], ["N(t)", C.amberBright], ["b(t)", C.amberBright],
-                  ["l(x)", C.textDim], ["d(x)", C.textDim], ["q(x)", C.textDim],
-                  ["l·b", C.textDim], ["x·l·b", C.textDim],
-                ].map(([h, col], i) => (
-                  <th key={h} style={{
-                    padding: "10px 8px", textAlign: "center",
-                    color: col, letterSpacing: "0.12em", fontWeight: 400,
-                    borderRight: i < 7 ? `1px solid ${C.panelBorder}` : "none",
-                  }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r, i) => (
-                <tr key={i} style={{
-                  borderBottom: `1px solid ${C.panelBorder}`,
-                  background: i % 2 === 0 ? "transparent" : "rgba(255,255,255,0.02)",
-                }}>
-                  <td style={tdCell(C.amber)}>{r.x}</td>
-                  <td style={tdCell(C.amberBright)}>
-                    <input type="number" value={r.Nt}
-                      onChange={(e) => updateCell(i, "Nt", e.target.value)}
-                      style={inputStyle} />
-                  </td>
-                  <td style={tdCell(C.amberBright)}>
-                    <input type="number" value={r.bt}
-                      onChange={(e) => updateCell(i, "bt", e.target.value)}
-                      style={inputStyle} />
-                  </td>
-                  <td style={tdCell(C.text)}>{fmt(r.lx)}</td>
-                  <td style={tdCell(C.text)}>{r.dx}</td>
-                  <td style={tdCell(C.text)}>{fmt(r.qx)}</td>
-                  <td style={tdCell(C.text)}>{fmt(r.lxbx)}</td>
-                  <td style={tdCell(C.text)}>{fmt(r.xlxbx)}</td>
-                </tr>
-              ))}
-              <tr style={{ background: "rgba(232,195,90,0.12)",
-                borderTop: `1px solid ${C.amber}` }}>
-                <td colSpan={6} style={{ padding: "10px 12px", textAlign: "right",
-                  color: C.amber, letterSpacing: "0.1em" }}>Σ ═══▶</td>
-                <td style={{ padding: "10px 8px", textAlign: "center",
-                  color: C.amberBright, letterSpacing: "0.05em" }}>
-                  {rows.reduce((s, r) => s + r.lxbx, 0).toFixed(3)}
-                </td>
-                <td style={{ padding: "10px 8px", textAlign: "center",
-                  color: C.amberBright, letterSpacing: "0.05em" }}>
-                  {rows.reduce((s, r) => s + r.xlxbx, 0).toFixed(3)}
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </Panel>
-
-      <Panel title="Demographic parameters · R₀, T, r, λ" defaultOpen status="OUTPUT">
-        <div style={{ display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 12 }}>
-          <MetricBox symbol="R₀" label="NET REPRO. RATE"
-            value={R0.toFixed(3)}
-            note={R0 > 1 ? "Growing ▲" : R0 < 1 ? "Declining ▼" : "Stable ═"}
-            noteColor={R0 > 1 ? C.green : R0 < 1 ? C.red : C.amber}/>
-          <MetricBox symbol="T" label="GENERATION TIME"
-            value={`${T.toFixed(2)} yr`} note="Σ x·l·b / R₀"/>
-          <MetricBox symbol="r" label="INTRINSIC RATE"
-            value={`${rRate.toFixed(3)} /yr`} note="≈ ln(R₀) / T"/>
-          <MetricBox symbol="λ" label="FINITE RATE"
-            value={`${lambda.toFixed(3)}×`} note="e^r · annual multiplier"/>
-        </div>
-      </Panel>
-
-      <Panel title="Step-by-step · How R₀ was calculated" status="HELP">
-        <P>R₀ is just the sum of the l·b column. Here are all ten rows:</P>
-        <div style={{ fontFamily: '"VT323", monospace', fontSize: 15,
-          color: C.text, lineHeight: 1.8, background: "rgba(0,0,0,0.25)",
-          padding: 14, borderRadius: 2, border: `1px solid ${C.panelBorder}` }}>
-          {rows.map((r, i) => (
-            <div key={i} style={{ display: "flex", justifyContent: "space-between" }}>
-              <span style={{ color: C.textDim }}>
-                age {r.x}: &nbsp;l({r.x}) × b({r.x}) &nbsp;=&nbsp; {r.lx.toFixed(3)} × {r.bt}
-              </span>
-              <span style={{ color: r.lxbx > 0 ? C.amber : C.textDim }}>
-                = {r.lxbx.toFixed(3)}
-              </span>
-            </div>
-          ))}
-          <div style={{ borderTop: `1px dashed ${C.amber}`, marginTop: 6,
-            paddingTop: 6, display: "flex", justifyContent: "space-between",
-            color: C.amberBright }}>
-            <span>R₀ = sum of column</span>
-            <span>= {R0.toFixed(3)}</span>
-          </div>
-        </div>
-      </Panel>
-    </>
-  );
-};
-
-// ══════════════════════════════════════════════════════════════════
-// CURVES PAGE
-// ══════════════════════════════════════════════════════════════════
-const CurvesPage = ({ computed }) => {
-  const { rows } = computed;
-  const axis = {
-    stroke: C.textDim,
-    tick: { fill: C.text, fontSize: 12, fontFamily: '"VT323", monospace' },
-  };
-  const tip = {
-    background: C.panel, border: `1px solid ${C.amber}`,
-    fontFamily: '"VT323", monospace', fontSize: 13, color: C.amber,
-    borderRadius: 2,
-  };
-
-  return (
-    <>
-      <Category>Visualization</Category>
-
-      <Panel title="Fig. 1 · Survivorship curve — l(x)" defaultOpen>
-        <P style={{ fontSize: 13, color: C.textDim }}>
-          Log y-axis reveals the mortality pattern. Concave (steep early drop) =
-          Type III, most fish. Straight line = Type II, constant mortality. Convex
-          (flat then steep drop) = Type I, long-lived.
-        </P>
-        <ResponsiveContainer width="100%" height={240}>
-          <LineChart data={rows} margin={{ top: 10, right: 20, left: 10, bottom: 20 }}>
-            <CartesianGrid stroke={C.panelBorder} strokeDasharray="2 4"/>
-            <XAxis dataKey="x" {...axis}
-              label={{ value: "age x (years)", position: "insideBottom",
-                offset: -4, fill: C.textDim, fontSize: 11,
-                fontFamily: '"VT323", monospace' }}/>
-            <YAxis {...axis} scale="log" domain={[0.01, 1]}
-              ticks={[0.01, 0.1, 1]} tickFormatter={(v) => v.toString()}
-              label={{ value: "l(x)  [log]", angle: -90,
-                position: "insideLeft", fill: C.textDim, fontSize: 11,
-                fontFamily: '"VT323", monospace' }}/>
-            <Tooltip contentStyle={tip}
-              formatter={(v) => typeof v === "number" ? v.toFixed(3) : v}/>
-            <Line type="monotone" dataKey="lx" stroke={C.amber}
-              strokeWidth={2.5} dot={{ fill: C.amber, r: 4 }}
-              activeDot={{ r: 6, fill: C.amberBright }} name="l(x)"/>
-          </LineChart>
-        </ResponsiveContainer>
-      </Panel>
-
-      <Panel title="Fig. 2 · Mortality rate — q(x)" defaultOpen>
-        <P style={{ fontSize: 13, color: C.textDim }}>
-          The probability of dying in each year of life. Normal pattern is high in
-          the first year (egg/larval mortality), low during juvenile/subadult years,
-          climbing back up at senescence.
-        </P>
-        <ResponsiveContainer width="100%" height={220}>
-          <BarChart data={rows} margin={{ top: 10, right: 20, left: 10, bottom: 20 }}>
-            <CartesianGrid stroke={C.panelBorder} strokeDasharray="2 4"/>
-            <XAxis dataKey="x" {...axis}
-              label={{ value: "age x (years)", position: "insideBottom",
-                offset: -4, fill: C.textDim, fontSize: 11,
-                fontFamily: '"VT323", monospace' }}/>
-            <YAxis {...axis} domain={[0, 1]}
-              label={{ value: "q(x)", angle: -90,
-                position: "insideLeft", fill: C.textDim, fontSize: 11,
-                fontFamily: '"VT323", monospace' }}/>
-            <Tooltip contentStyle={tip}
-              formatter={(v) => typeof v === "number" ? v.toFixed(3) : v}/>
-            <Bar dataKey="qx" fill={C.red} name="q(x)" radius={[2, 2, 0, 0]}/>
-          </BarChart>
-        </ResponsiveContainer>
-      </Panel>
-
-      <Panel title="Fig. 3 · Reproductive contribution — l(x)·b(x)" defaultOpen>
-        <P style={{ fontSize: 13, color: C.textDim }}>
-          The area under the amber curve equals R₀. Green bars are raw fecundity
-          b(x). Amber line is b(x) discounted by the survival chance l(x). Notice
-          how old fish with declining survival contribute less even if they still
-          reproduce.
-        </P>
-        <ResponsiveContainer width="100%" height={240}>
-          <ComposedChart data={rows} margin={{ top: 10, right: 20, left: 10, bottom: 20 }}>
-            <CartesianGrid stroke={C.panelBorder} strokeDasharray="2 4"/>
-            <XAxis dataKey="x" {...axis}
-              label={{ value: "age x (years)", position: "insideBottom",
-                offset: -4, fill: C.textDim, fontSize: 11,
-                fontFamily: '"VT323", monospace' }}/>
-            <YAxis {...axis}/>
-            <Tooltip contentStyle={tip}
-              formatter={(v) => typeof v === "number" ? v.toFixed(3) : v}/>
-            <Legend wrapperStyle={{ fontFamily: '"VT323", monospace',
-              fontSize: 12, color: C.textDim }}/>
-            <Area type="monotone" dataKey="lxbx" fill={C.amber}
-              fillOpacity={0.2} stroke="none" name="area = R₀"/>
-            <Bar dataKey="bt" fill={C.green} name="b(x) raw" opacity={0.5}
-              radius={[2, 2, 0, 0]}/>
-            <Line type="monotone" dataKey="lxbx" stroke={C.amberBright}
-              strokeWidth={2.5} dot={{ fill: C.amberBright, r: 4 }}
-              name="l(x)·b(x)"/>
-          </ComposedChart>
-        </ResponsiveContainer>
-      </Panel>
-    </>
-  );
-};
-
-// ══════════════════════════════════════════════════════════════════
-// INTERPRET PAGE
-// ══════════════════════════════════════════════════════════════════
-const FindingBox = ({ label, value, note }) => (
-  <div style={{
-    background: "rgba(0,0,0,0.25)", border: `1px solid ${C.panelBorder}`,
-    borderLeft: `3px solid ${C.cyan}`, padding: "12px 14px", borderRadius: 2,
-  }}>
-    <div style={{ fontFamily: '"VT323", monospace', fontSize: 11,
-      color: C.cyan, letterSpacing: "0.2em", marginBottom: 4 }}>{label}</div>
-    <div style={{ fontFamily: '"VT323", monospace', fontSize: 22,
-      color: C.amberBright, letterSpacing: "0.04em" }}>{value}</div>
-    <div style={{ fontFamily: '"VT323", monospace', fontSize: 12,
-      color: C.textDim, marginTop: 4, letterSpacing: "0.05em" }}>{note}</div>
-  </div>
-);
-
-const Lever = ({ t, e }) => (
-  <div style={{ padding: "10px 14px",
-    background: "rgba(232,195,90,0.04)",
-    borderLeft: `2px solid ${C.amber}`, borderRadius: 2 }}>
-    <div style={{ fontFamily: '"VT323", monospace', fontSize: 15,
-      color: C.amber, letterSpacing: "0.06em", marginBottom: 3 }}>
-      ▸ {t}
-    </div>
-    <div style={{ fontFamily: '"IBM Plex Sans", sans-serif', fontSize: 13,
-      color: C.text, lineHeight: 1.5 }}>{e}</div>
-  </div>
-);
-
-const InterpretPage = ({ computed }) => {
-  const { rows, R0, T, r, lambda } = computed;
-  const peakRepro = [...rows].sort((a, b) => b.lxbx - a.lxbx)[0];
-  const ageMaturity = rows.find(r => r.bt > 0)?.x ?? "—";
-  const maxAge = rows[rows.length - 1]?.x;
-  const firstYearSurvival = rows[0]?.sx || 0;
-  const oldestCohortSurvival = rows[rows.length - 1]?.lx || 0;
-
-  const verdict =
-    R0 > 1.5 ? { w: "GROWING STRONGLY", c: C.green, ic: "▲▲" } :
-    R0 > 1.0 ? { w: "GROWING",          c: C.green, ic: "▲" } :
-    R0 === 1 ? { w: "STABLE",           c: C.amber, ic: "═" } :
-    R0 > 0   ? { w: "DECLINING",        c: C.red,   ic: "▼" } :
-               { w: "COLLAPSING",       c: C.red,   ic: "▼▼" };
-
-  const projection = [];
-  for (let t = 0; t <= 10; t++) {
-    projection.push({ year: t, N: Math.round(1000 * Math.exp(r * t)) });
+  function ready() {
+    return typeof React !== "undefined"
+        && typeof ReactDOM !== "undefined"
+        && typeof Recharts !== "undefined"
+        && typeof XLSX !== "undefined";
   }
 
-  return (
-    <>
-      <Category>Diagnosis</Category>
+  function showError(msg) {
+    if (errEl) {
+      errEl.style.display = "block";
+      errEl.textContent = msg;
+    }
+  }
 
-      <Panel title="Headline · Population status" defaultOpen status={verdict.w}>
-        <div style={{
-          background: "rgba(0,0,0,0.3)", padding: "18px 20px",
-          border: `1px solid ${verdict.c}`, borderLeft: `4px solid ${verdict.c}`,
-          borderRadius: 2, marginBottom: 14,
-        }}>
-          <div style={{ fontFamily: '"VT323", monospace', fontSize: 13,
-            color: verdict.c, letterSpacing: "0.2em", marginBottom: 6 }}>
-            ▸ STATUS: {verdict.ic}
-          </div>
-          <div style={{ fontFamily: '"VT323", monospace', fontSize: 28,
-            color: verdict.c, letterSpacing: "0.08em", lineHeight: 1.1 }}>
-            POPULATION IS {verdict.w}
-          </div>
-        </div>
-        <P>
-          Each female produces, on average,{" "}
-          <strong style={{ color: C.amberBright }}>{R0.toFixed(2)}</strong>{" "}
-          female offspring in her lifetime. With a generation time of{" "}
-          <strong style={{ color: C.amberBright }}>{T.toFixed(1)} years</strong>,
-          the intrinsic growth rate is{" "}
-          <strong style={{ color: C.amberBright }}>r = {r.toFixed(3)} per year</strong>,
-          meaning population size multiplies by{" "}
-          <strong style={{ color: C.amberBright }}>{lambda.toFixed(2)}×</strong>{" "}
-          annually.
-        </P>
-      </Panel>
+  function tick() {
+    if (ready()) {
+      try { runApp(); }
+      catch (e) {
+        showError("Boot error: " + e.message);
+        console.error(e);
+      }
+    } else if (Date.now() - startedAt > maxWait) {
+      showError("Could not load React/Recharts from CDN. Check your internet connection or try refreshing.");
+    } else {
+      requestAnimationFrame(tick);
+    }
+  }
 
-      <Panel title="Life history findings" defaultOpen>
-        <div style={{ display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 12 }}>
-          <FindingBox label="AGE AT FIRST REPRO" value={`${ageMaturity} yr`}
-            note={typeof ageMaturity === "number" && ageMaturity >= 4
-              ? "delayed maturity" : "early maturity"}/>
-          <FindingBox label="PEAK REPRO AGE"
-            value={peakRepro ? `${peakRepro.x} yr` : "—"}
-            note={peakRepro ? `contributes ${peakRepro.lxbx.toFixed(2)} to R₀` : ""}/>
-          <FindingBox label="MAX OBSERVED AGE" value={`${maxAge} yr`}
-            note={`${(oldestCohortSurvival * 100).toFixed(1)}% reach this age`}/>
-          <FindingBox label="FIRST-YEAR SURVIVAL"
-            value={`${(firstYearSurvival * 100).toFixed(1)}%`}
-            note={firstYearSurvival < 0.5 ? "high juvenile mortality" : "strong early survival"}/>
-        </div>
-      </Panel>
+  function runApp() {
+const{useState,useMemo,useEffect,useCallback,useRef,memo}=React,{LineChart,Line,XAxis,YAxis,CartesianGrid,Tooltip,ResponsiveContainer,BarChart,Bar,ComposedChart,Area,Legend}=Recharts,STORAGE_KEY="cohortlog-data-v1",TUTORIAL_KEY="cohortlog-tutorial-seen-v3",SCENARIO_KEY="cohortlog-scenario-v1",INITIAL_DATA=Object.freeze([{x:0,Nt:1e3,bt:0},{x:1,Nt:930,bt:0},{x:2,Nt:920,bt:0},{x:3,Nt:880,bt:0},{x:4,Nt:860,bt:2},{x:5,Nt:840,bt:4},{x:6,Nt:710,bt:4},{x:7,Nt:450,bt:3},{x:8,Nt:230,bt:1},{x:9,Nt:50,bt:0}]),cloneInitial=()=>INITIAL_DATA.map(e=>({...e})),C={bg0:"#0a2230",bg1:"#0f3347",bg2:"#1a4a63",panel:"#061520",panelBorder:"#1d4054",amber:"#e8c35a",amberDim:"#b0913f",amberBright:"#f5d676",text:"#d6e3ea",textDim:"#7d99a8",cyan:"#5ecce0",red:"#d87060",green:"#6ac27a",inputBg:"#0a2a3a",tabBlue:"#1a5478",tabBlueActive:"#2a729c"};function computeLifeTable(e){const t=e[0]?.Nt||1,a=new Array(e.length);let i=0,l=0;for(let f=0;f<e.length;f++){const p=e[f],m=f+1<e.length?e[f+1].Nt:0,y=p.Nt/t,h=p.Nt-m,T=p.Nt>0?h/p.Nt:0,g=p.Nt>0?m/p.Nt:0,s=y*p.bt,d=p.x*s;i+=s,l+=d,a[f]={...p,lx:y,dx:h,qx:T,sx:g,lxbx:s,xlxbx:d}}const c=i>0?l/i:0,r=i>0?Math.log(i)/c:0,o=Math.exp(r);return{rows:a,R0:i,T:c,r,lambda:o,sumXlxbx:l}}function validateData(e){const t=[];for(let i=1;i<e.length;i++)e[i].Nt>e[i-1].Nt&&t.push(`N(${e[i].x}) > N(${e[i-1].x}). Cohort can't grow \u2014 check data.`);e[0]?.Nt===0&&t.push("N(0) is zero. Set a starting cohort size.");const a=e[e.length-1];return a&&a.Nt>0&&a.Nt>e[0].Nt*.5&&t.push("Cohort is still mostly alive at max age \u2014 table may not capture full lifespan."),t}function loadStored(e,t){try{const a=localStorage.getItem(e);return a?JSON.parse(a):t}catch{return t}}function saveStored(e,t){try{localStorage.setItem(e,JSON.stringify(t))}catch{}}function loadInitialData(){const e=loadStored(STORAGE_KEY,null);return Array.isArray(e)&&e.length>0?e:cloneInitial()}function downloadCSV(e,t){
+  const wb = XLSX.utils.book_new();
+  const NROWS = t.rows.length;
+  const ROW0 = 5;
+  const FIRST = ROW0;
+  const LAST = ROW0 + NROWS - 1;
+  const SUMROW = LAST + 2;
+  const ws = {};
+  const setCell = (addr, value, formula, format) => {
+    const cell = formula
+      ? { t: "n", f: formula }
+      : (typeof value === "number" ? { t: "n", v: value } : { t: "s", v: String(value) });
+    if (format) cell.z = format;
+    ws[addr] = cell;
+  };
 
-      <Panel title="Fig. 4 · 10-year projection" defaultOpen>
-        <P style={{ fontSize: 13, color: C.textDim }}>
-          Exponential model N(t) = 1000·e^({r.toFixed(3)}·t) assuming current vital
-          rates hold constant. Real stocks rarely grow this cleanly — density
-          dependence, environment, and fishing all kick in — but it's a useful
-          "what if nothing changes" scenario.
-        </P>
-        <ResponsiveContainer width="100%" height={240}>
-          <LineChart data={projection} margin={{ top: 10, right: 20, left: 10, bottom: 20 }}>
-            <CartesianGrid stroke={C.panelBorder} strokeDasharray="2 4"/>
-            <XAxis dataKey="year" stroke={C.textDim}
-              tick={{ fill: C.text, fontSize: 12, fontFamily: '"VT323", monospace' }}
-              label={{ value: "years into future", position: "insideBottom",
-                offset: -4, fill: C.textDim, fontSize: 11,
-                fontFamily: '"VT323", monospace' }}/>
-            <YAxis stroke={C.textDim}
-              tick={{ fill: C.text, fontSize: 12, fontFamily: '"VT323", monospace' }}/>
-            <Tooltip contentStyle={{ background: C.panel, border: `1px solid ${C.amber}`,
-              fontFamily: '"VT323", monospace', fontSize: 13, color: C.amber }}/>
-            <Line type="monotone" dataKey="N" stroke={C.green}
-              strokeWidth={2.5} dot={{ fill: C.green, r: 4 }} name="N(t)"/>
-          </LineChart>
-        </ResponsiveContainer>
-      </Panel>
+  // Title block
+  setCell("A1", "COHORTLOG Life Table Export");
+  setCell("A2", "Generated: " + new Date().toLocaleString());
+  // (row 3 blank)
 
-      <Panel title="Management levers · What to try">
-        <P>
-          Life tables turn abstract management decisions into concrete number
-          changes. Go to Table and try editing:
-        </P>
-        <div style={{ display: "grid", gap: 10 }}>
-          <Lever t="Raise a minimum-size limit"
-            e="Reduce q(x) for the youngest legal sizes. Watch R₀ climb as more fish survive to spawn."/>
-          <Lever t="Open a spawning-season fishery"
-            e="Cut b(x) at peak reproductive ages. Even small cuts to the middle of the b(x) column crater R₀."/>
-          <Lever t="Introduce a slot limit (protect big old spawners)"
-            e="Keep l(x) high at ages 5–7. These fish are the biggest contributors to R₀."/>
-          <Lever t="Improve juvenile habitat"
-            e="Raise N(1), N(2), N(3). Because survival compounds, boosting juvenile survival is often the highest-leverage intervention."/>
-        </div>
-      </Panel>
-    </>
-  );
-};
+  // Headers (row 4) — plain text, no equals sign so Excel does not parse
+  const headers = ["x", "N(t)", "b(t)", "l(x)", "d(x)", "q(x)", "l(x)*b(x)", "x*l(x)*b(x)"];
+  const cols = ["A","B","C","D","E","F","G","H"];
+  headers.forEach((h, i) => setCell(cols[i] + "4", h));
 
-// ══════════════════════════════════════════════════════════════════
-// MAIN APP
-// ══════════════════════════════════════════════════════════════════
-const PAGES = [
-  { id: "learn",     label: "Reference" },
-  { id: "calc",      label: "Table" },
-  { id: "curves",    label: "Curves" },
-  { id: "interpret", label: "Diagnose" },
-];
+  // Data rows
+  t.rows.forEach((o, i) => {
+    const r = ROW0 + i;
+    const next = ROW0 + i + 1;
+    setCell("A" + r, o.x);
+    setCell("B" + r, o.Nt);
+    setCell("C" + r, o.bt);
+    setCell("D" + r, null, "B" + r + "/$B$" + FIRST, "0.000");
+    if (i < NROWS - 1) {
+      setCell("E" + r, null, "B" + r + "-B" + next);
+    } else {
+      setCell("E" + r, null, "B" + r);
+    }
+    setCell("F" + r, null, "IF(B" + r + "=0,0,E" + r + "/B" + r + ")", "0.000");
+    setCell("G" + r, null, "D" + r + "*C" + r, "0.000");
+    setCell("H" + r, null, "A" + r + "*G" + r, "0.000");
+  });
 
-function App() {
-  const [page, setPage] = useState("learn");
-  const [rawData, setRawData] = useState(INITIAL_DATA.map(r => ({ ...r })));
-  const computed = useMemo(() => computeLifeTable(rawData), [rawData]);
-  const R0Display = computed.R0.toFixed(2);
+  // Sum row (Greek sigma is fine inside a string cell value in xlsx)
+  setCell("C" + SUMROW, "SUM:");
+  setCell("D" + SUMROW, null, "SUM(D" + FIRST + ":D" + LAST + ")", "0.000");
+  setCell("E" + SUMROW, null, "SUM(E" + FIRST + ":E" + LAST + ")");
+  setCell("G" + SUMROW, null, "SUM(G" + FIRST + ":G" + LAST + ")", "0.000");
+  setCell("H" + SUMROW, null, "SUM(H" + FIRST + ":H" + LAST + ")", "0.000");
 
-  // Hide loading screen once mounted
-  useEffect(() => {
-    const el = document.getElementById("loading");
-    if (el) el.style.display = "none";
-  }, []);
+  // Demographic parameters
+  const PSTART = SUMROW + 3;
+  setCell("A" + PSTART, "DEMOGRAPHIC PARAMETERS");
+  setCell("B" + PSTART, "Value");
+  setCell("C" + PSTART, "Formula meaning");
 
-  return (
-    <div style={{
-      minHeight: "100vh",
-      background: `radial-gradient(ellipse at 20% 15%, ${C.bg2} 0%, ${C.bg1} 25%, ${C.bg0} 60%, #051520 100%)`,
-      fontFamily: '"IBM Plex Sans", "Helvetica Neue", sans-serif',
-      color: C.text, position: "relative", paddingBottom: 70,
-    }}>
-      <svg style={{
-        position: "absolute", top: 0, left: 0, width: "100%", height: "100%",
-        pointerEvents: "none", opacity: 0.4,
-      }}>
-        {Array.from({ length: 24 }).map((_, i) => {
-          const seed = i * 137.5;
-          const x = (seed * 7.3) % 100;
-          const y = (seed * 11.7) % 100;
-          const s = 0.5 + ((seed * 3.1) % 2);
-          return <circle key={i} cx={`${x}%`} cy={`${y}%`} r={s}
-            fill="rgba(180,220,255,0.5)"/>;
-        })}
-      </svg>
+  setCell("A" + (PSTART + 1), "R0 (net reproductive rate)");
+  setCell("B" + (PSTART + 1), null, "G" + SUMROW, "0.0000");
+  setCell("C" + (PSTART + 1), "sum of l(x)*b(x)");
 
-      <header style={{
-        position: "relative", zIndex: 2, padding: "16px 24px 10px",
-        display: "flex", justifyContent: "space-between", alignItems: "flex-start",
-        borderTop: `3px solid ${C.amber}`, borderBottom: `1px solid ${C.panelBorder}`,
-      }}>
-        <div>
-          <div style={{
-            fontFamily: '"VT323", monospace', fontSize: 22,
-            color: C.text, letterSpacing: "0.1em", fontWeight: 400,
-          }}>COHORTLOG 1.0</div>
-          <div style={{
-            display: "inline-block", marginTop: 8, padding: "4px 10px",
-            border: `1px solid ${C.panelBorder}`, background: "rgba(0,0,0,0.3)",
-            fontFamily: '"VT323", monospace', fontSize: 12,
-            color: C.textDim, letterSpacing: "0.15em",
-          }}>
-            {rawData.length} AGE CLASSES · R₀ = {R0Display}
-          </div>
-        </div>
-        <div style={{
-          padding: "4px 10px", border: `1px solid ${C.panelBorder}`,
-          background: "rgba(0,0,0,0.3)",
-          fontFamily: '"VT323", monospace', fontSize: 12,
-          color: C.text, letterSpacing: "0.2em",
-        }}>
-          {computed.R0 > 1 ? "GROWING" : computed.R0 < 1 ? "DECLINING" : "STABLE"}
-        </div>
-      </header>
+  setCell("A" + (PSTART + 2), "T (generation time, yr)");
+  setCell("B" + (PSTART + 2), null, "H" + SUMROW + "/G" + SUMROW, "0.0000");
+  setCell("C" + (PSTART + 2), "sum of x*l(x)*b(x) divided by R0");
 
-      <main style={{
-        position: "relative", zIndex: 2,
-        maxWidth: 860, margin: "0 auto", padding: "20px 20px 40px",
-      }}>
-        {page === "learn"     && <LearnPage/>}
-        {page === "calc"      && <CalcPage rawData={rawData}
-                                    setRawData={setRawData} computed={computed}/>}
-        {page === "curves"    && <CurvesPage computed={computed}/>}
-        {page === "interpret" && <InterpretPage computed={computed}/>}
-      </main>
+  setCell("A" + (PSTART + 3), "r (intrinsic rate, /yr)");
+  setCell("B" + (PSTART + 3), null, "LN(G" + SUMROW + ")/(H" + SUMROW + "/G" + SUMROW + ")", "0.0000");
+  setCell("C" + (PSTART + 3), "ln(R0) divided by T");
 
-      <nav style={{
-        position: "fixed", bottom: 0, left: 0, right: 0,
-        display: "grid",
-        gridTemplateColumns: `repeat(${PAGES.length}, 1fr)`,
-        background: C.bg1, borderTop: `1px solid ${C.panelBorder}`, zIndex: 10,
-      }}>
-        {PAGES.map((p) => {
-          const active = page === p.id;
-          return (
-            <button key={p.id} onClick={() => setPage(p.id)} style={{
-              padding: "14px 8px",
-              background: active ? C.tabBlueActive : C.tabBlue,
-              border: "none", borderRight: `1px solid ${C.panelBorder}`,
-              cursor: "pointer",
-              fontFamily: '"IBM Plex Sans", sans-serif',
-              fontSize: 13, color: active ? "#fff" : "rgba(255,255,255,0.85)",
-              fontWeight: active ? 600 : 400, letterSpacing: "0.02em",
-              transition: "background 120ms",
-            }}>{p.label}</button>
-          );
-        })}
-      </nav>
-    </div>
-  );
-}
+  setCell("A" + (PSTART + 4), "lambda (finite rate)");
+  setCell("B" + (PSTART + 4), null, "EXP(LN(G" + SUMROW + ")/(H" + SUMROW + "/G" + SUMROW + "))", "0.0000");
+  setCell("C" + (PSTART + 4), "e raised to r");
 
-const root = ReactDOM.createRoot(document.getElementById("root"));
-root.render(<App />);
+  setCell("A" + (PSTART + 6), "Open in Excel or Sheets. Edit columns B and C to see formulas recalculate.");
+
+  // Set worksheet range and column widths
+  ws["!ref"] = "A1:H" + (PSTART + 6);
+  ws["!cols"] = [
+    { wch: 5 }, { wch: 8 }, { wch: 8 },
+    { wch: 10 }, { wch: 10 }, { wch: 10 },
+    { wch: 12 }, { wch: 14 },
+  ];
+
+  // Merge title cells
+  ws["!merges"] = [
+    { s: { r: 0, c: 0 }, e: { r: 0, c: 7 } },
+    { s: { r: 1, c: 0 }, e: { r: 1, c: 7 } },
+    { s: { r: PSTART - 1, c: 0 }, e: { r: PSTART - 1, c: 7 } },
+    { s: { r: PSTART + 5, c: 0 }, e: { r: PSTART + 5, c: 7 } },
+  ];
+
+  XLSX.utils.book_append_sheet(wb, ws, "Life Table");
+  const filename = "cohortlog_" + new Date().toISOString().slice(0, 10) + ".xlsx";
+  XLSX.writeFile(wb, filename);
+}const Bubbles=memo(()=>{const e=useMemo(()=>{const t=[];for(let a=0;a<18;a++)t.push({id:a,size:4+Math.random()*14,left:Math.random()*100,delay:Math.random()*18,duration:14+Math.random()*16,wobble:10+Math.random()*30,opacity:.15+Math.random()*.35});return t},[]);return React.createElement("div",{"aria-hidden":"true",style:{position:"fixed",inset:0,pointerEvents:"none",zIndex:0,overflow:"hidden"}},e.map(t=>React.createElement("div",{key:t.id,style:{position:"absolute",left:`${t.left}%`,bottom:"-30px",width:t.size,height:t.size,borderRadius:"50%",background:`radial-gradient(circle at 35% 35%,
+            rgba(255,255,255,${t.opacity*.8}) 0%,
+            rgba(180,220,255,${t.opacity*.4}) 40%,
+            rgba(94,204,224,${t.opacity*.2}) 70%,
+            transparent 100%)`,boxShadow:`inset -1px -1px 2px rgba(255,255,255,${t.opacity*.5}),
+                      0 0 6px rgba(94,204,224,${t.opacity*.3})`,animation:`bubbleRise ${t.duration}s linear ${t.delay}s infinite,
+                      bubbleWobble ${t.duration/3}s ease-in-out ${t.delay}s infinite alternate`,"--wobble":`${t.wobble}px`}})))}),Category=memo(({children:e,id:t})=>React.createElement("div",{id:t,style:{display:"flex",alignItems:"center",gap:10,marginTop:28,marginBottom:14,paddingLeft:2}},React.createElement("div",{style:{width:3,height:18,background:C.amber,boxShadow:`0 0 6px ${C.amber}`}}),React.createElement("div",{style:{fontFamily:'"VT323", "Courier New", monospace',fontSize:18,color:C.amber,letterSpacing:"0.18em",textTransform:"uppercase"}},e))),Panel=memo(({title:e,defaultOpen:t=!1,children:a,status:i,statusColor:l,id:c})=>{const[r,o]=useState(t),f=useCallback(()=>o(p=>!p),[]);return React.createElement("div",{id:c,style:{background:`linear-gradient(180deg, ${C.panel} 0%, #04101a 100%)`,border:`1px solid ${C.panelBorder}`,borderRadius:3,marginBottom:12,boxShadow:"inset 0 1px 0 rgba(255,255,255,0.03), 0 2px 8px rgba(0,0,0,0.3)",overflow:"hidden"}},React.createElement("button",{onClick:f,"aria-expanded":r,style:{width:"100%",display:"flex",alignItems:"center",justifyContent:"space-between",padding:"14px 18px",background:"transparent",border:"none",cursor:"pointer",borderBottom:r?`1px solid ${C.panelBorder}`:"none"}},React.createElement("div",{style:{display:"flex",alignItems:"center",gap:12}},React.createElement("span",{style:{color:C.amber,fontFamily:'"VT323", monospace',fontSize:18,display:"inline-block",width:12,textAlign:"center"}},r?"v":">"),React.createElement("span",{style:{fontFamily:'"VT323", "Courier New", monospace',fontSize:17,color:C.amber,letterSpacing:"0.14em",textTransform:"uppercase",textAlign:"left"}},e)),React.createElement("div",{style:{display:"flex",alignItems:"center",gap:10}},i&&React.createElement("span",{style:{fontFamily:'"VT323", monospace',fontSize:12,color:l||C.textDim,letterSpacing:"0.15em"}},i),React.createElement("span",{style:{color:C.amberDim,fontFamily:"monospace",fontSize:11}},"\u25B8"))),r&&React.createElement("div",{style:{padding:"16px 20px 20px"}},a))}),P=({children:e,style:t})=>React.createElement("p",{style:{fontFamily:'"IBM Plex Sans", "Helvetica Neue", sans-serif',fontSize:14,lineHeight:1.65,color:C.text,margin:"0 0 12px",...t}},e),Term=({children:e})=>React.createElement("span",{style:{fontFamily:'"VT323", monospace',fontSize:16,color:C.amber,letterSpacing:"0.05em"}},e),Formula=({children:e,note:t})=>React.createElement("div",{style:{background:"rgba(232,195,90,0.06)",border:"1px solid rgba(232,195,90,0.3)",borderLeft:`3px solid ${C.amber}`,padding:"12px 16px",margin:"10px 0",borderRadius:2}},React.createElement("div",{style:{fontFamily:'"VT323", monospace',fontSize:18,color:C.amberBright,letterSpacing:"0.04em"}},e),t&&React.createElement("div",{style:{fontFamily:'"IBM Plex Sans", sans-serif',fontSize:12,color:C.textDim,marginTop:6,fontStyle:"italic"}},t)),Example=({children:e})=>React.createElement("div",{style:{background:"rgba(94,204,224,0.05)",border:"1px solid rgba(94,204,224,0.25)",borderLeft:`3px solid ${C.cyan}`,padding:"12px 16px",margin:"12px 0",borderRadius:2}},React.createElement("div",{style:{fontFamily:'"VT323", monospace',fontSize:12,color:C.cyan,letterSpacing:"0.2em",marginBottom:6}},"\u25B8 WORKED EXAMPLE"),React.createElement("div",{style:{fontFamily:'"IBM Plex Sans", sans-serif',fontSize:13.5,color:C.text,lineHeight:1.6}},e)),MiniHead=({children:e})=>React.createElement("div",{style:{fontFamily:'"VT323", monospace',fontSize:13,color:C.amberDim,letterSpacing:"0.2em",textTransform:"uppercase",marginBottom:8,marginTop:16}},"// ",e),Btn=({onClick:e,children:t,variant:a="default",style:i,disabled:l,id:c})=>{const r={default:{bg:"transparent",border:C.amber,text:C.amber},cyan:{bg:"transparent",border:C.cyan,text:C.cyan},green:{bg:"transparent",border:C.green,text:C.green},red:{bg:"transparent",border:C.red,text:C.red},solid:{bg:C.amber,border:C.amber,text:C.bg0}}[a];return React.createElement("button",{id:c,onClick:e,disabled:l,style:{fontFamily:'"VT323", monospace',fontSize:14,letterSpacing:"0.1em",textTransform:"uppercase",background:r.bg,color:r.text,border:`1px solid ${r.border}`,padding:"6px 14px",cursor:l?"not-allowed":"pointer",borderRadius:2,opacity:l?.4:1,...i}},t)},Walkthrough=({onClose:e})=>{const[t,a]=useState(0),i=useMemo(()=>[{title:"Welcome to COHORTLOG",body:React.createElement(React.Fragment,null,React.createElement(P,null,"COHORTLOG is an interactive life table for fisheries cohort analysis. You'll see how survival data and reproduction data combine to predict population growth."),React.createElement(P,{style:{color:C.textDim,fontSize:13}},"This is a quick tour \u2014 about 10 slides. You can re-open it anytime from the Reference tab.")),target:null},{title:"Status header",body:React.createElement(P,null,"The header shows the app version, the number of age classes loaded, and the live ",React.createElement(Term,null,"R\u2080")," value. The badge on the right flips between ",React.createElement("span",{style:{color:C.green}},"GROWING"),","," ",React.createElement("span",{style:{color:C.amber}},"STABLE"),", and"," ",React.createElement("span",{style:{color:C.red}},"DECLINING")," as you edit data."),target:"#cl-header"},{title:"Tab navigation",body:React.createElement(P,null,"Four tabs: ",React.createElement("strong",{style:{color:C.amber}},"Table")," ","(worksheet), ",React.createElement("strong",{style:{color:C.amber}},"Curves")," ","(charts), ",React.createElement("strong",{style:{color:C.amber}},"Diagnose")," ","(interpretation), and ",React.createElement("strong",{style:{color:C.amber}},"Reference")," ","(formulas + terms of use)."),target:"#cl-nav"},{title:"The data table",body:React.createElement(React.Fragment,null,React.createElement(P,null,"The ",React.createElement("strong",{style:{color:C.amberBright}},"yellow cells")," ","in the N(t) and b(t) columns are editable. Every other column recalculates automatically."),React.createElement(P,{style:{fontSize:13,color:C.textDim}},"Edits save automatically between sessions.")),target:"#cl-table"},{title:"The buttons",body:React.createElement(React.Fragment,null,React.createElement(P,null,React.createElement("strong",{style:{color:C.amber}},"RESET")," restores the default cohort.",React.createElement("br",null),React.createElement("strong",{style:{color:C.cyan}},"SAVE SCENARIO")," locks in your current values as a baseline so you can compare changes.",React.createElement("br",null),React.createElement("strong",{style:{color:C.green}},"EXPORT XLSX")," downloads the full computed table.")),target:"#cl-buttons"},{title:"The four key metrics",body:React.createElement(React.Fragment,null,React.createElement(P,{style:{fontSize:13}},React.createElement(Term,null,"R\u2080")," \u2014 Lifetime offspring per female. Above 1 = growing.",React.createElement("br",null),React.createElement(Term,null,"T")," \u2014 Average mother's age at reproduction.",React.createElement("br",null),React.createElement(Term,null,"r")," \u2014 Per-year growth rate.",React.createElement("br",null),React.createElement(Term,null,"\u03BB")," \u2014 Per-year multiplier (1.5 = 50% more next year)."),React.createElement(P,{style:{fontSize:13,color:C.textDim}},"After saving a scenario, each box also shows a \u0394 value telling you how much it's moved from the baseline.")),target:"#cl-metrics"},{title:"Curves tab",body:React.createElement(React.Fragment,null,React.createElement(P,null,"The ",React.createElement("strong",{style:{color:C.amber}},"Curves")," tab plots the same data three ways:"),React.createElement(P,{style:{fontSize:13}},React.createElement("strong",null,"Fig. 1")," \xB7 Survivorship on a log scale",React.createElement("br",null),React.createElement("strong",null,"Fig. 2")," \xB7 Mortality rate vs raw death counts",React.createElement("br",null),React.createElement("strong",null,"Fig. 3")," \xB7 Reproductive contribution (area = R\u2080)")),target:null},{title:"Diagnose tab",body:React.createElement(P,null,React.createElement("strong",{style:{color:C.amber}},"Diagnose")," translates the numbers into plain English. You'll get a status verdict, life-history findings (peak reproductive age, first-year survival), a 10-year population projection, and management lever suggestions."),target:null},{title:"Reference tab",body:React.createElement(P,null,React.createElement("strong",{style:{color:C.amber}},"Reference")," is your cheat sheet \u2014 every formula explained with worked examples, a FAQ on why fecundity counts only female offspring, and the terms of use for educational and professional contexts."),target:null},{title:"That's the tour",body:React.createElement(React.Fragment,null,React.createElement(P,{style:{color:C.green}},"You're ready to go. Have fun."),React.createElement(P,{style:{fontSize:13,color:C.textDim}},"Re-open this tour from the Reference tab whenever you want.")),target:null}],[]),l=i[t],c=t===i.length-1,r=i.length;useEffect(()=>{const g=s=>{s.key==="Escape"?e():s.key==="ArrowRight"&&!c?a(d=>d+1):s.key==="ArrowLeft"&&t>0&&a(d=>d-1)};return window.addEventListener("keydown",g),()=>window.removeEventListener("keydown",g)},[e,t,c]);const[o,f]=useState(null),[p,m]=useState("bottom");useEffect(()=>{if(!l.target){f(null),m("bottom");return}const g=document.querySelector(l.target);if(!g){f(null),m("bottom");return}g.scrollIntoView({behavior:"smooth",block:"center"});const s=()=>{const u=g.getBoundingClientRect(),w=Math.max(8,Math.min(20,60-u.width/4));f({top:u.top-w,left:u.left-w,width:u.width+w*2,height:u.height+w*2});const x=u.top+u.height/2,n=window.innerHeight;m(x>n/2?"top":"bottom")};s();const d=setTimeout(s,350);return()=>clearTimeout(d)},[t,l.target]);const y={position:"absolute",background:"rgba(5,21,32,0.78)",pointerEvents:"none"},h=()=>c?e():a(g=>g+1),T=()=>a(g=>Math.max(0,g-1));return React.createElement(React.Fragment,null,React.createElement("div",{style:{position:"fixed",inset:0,zIndex:999,pointerEvents:"none"}},!o&&React.createElement("div",{style:{...y,inset:0}}),o&&React.createElement(React.Fragment,null,React.createElement("div",{style:{...y,top:0,left:0,width:"100%",height:Math.max(0,o.top)}}),React.createElement("div",{style:{...y,top:o.top,left:0,width:Math.max(0,o.left),height:o.height}}),React.createElement("div",{style:{...y,top:o.top,left:o.left+o.width,width:`calc(100% - ${o.left+o.width}px)`,height:o.height}}),React.createElement("div",{style:{...y,top:o.top+o.height,left:0,width:"100%",height:`calc(100% - ${o.top+o.height}px)`}}),React.createElement("div",{style:{position:"absolute",top:o.top,left:o.left,width:o.width,height:o.height,border:`2px solid ${C.amber}`,borderRadius:4,boxShadow:`0 0 20px rgba(232,195,90,0.6),
+                          inset 0 0 20px rgba(232,195,90,0.15)`,pointerEvents:"none",animation:"tutorialPulse 2s ease-in-out infinite"}}))),React.createElement("div",{role:"dialog","aria-modal":"true",style:{position:"fixed",zIndex:1e3,...p==="top"?{top:16}:{bottom:80},left:"50%",transform:"translateX(-50%)",maxWidth:460,width:"calc(100% - 32px)",background:`linear-gradient(180deg, ${C.panel} 0%, #04101a 100%)`,border:`1px solid ${C.amber}`,boxShadow:"0 0 30px rgba(232,195,90,0.3)",borderRadius:4,padding:"20px 22px 18px",pointerEvents:"auto"}},React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}},React.createElement("div",{style:{fontFamily:'"VT323", monospace',fontSize:12,color:C.cyan,letterSpacing:"0.2em"}},"\u25B8 SLIDE ",t+1," / ",r),React.createElement("button",{onClick:e,"aria-label":"Close walkthrough",style:{background:"transparent",border:"none",color:C.textDim,fontFamily:"monospace",fontSize:18,cursor:"pointer",padding:4}},"\u2715")),React.createElement("div",{style:{fontFamily:'"VT323", monospace',fontSize:20,color:C.amber,letterSpacing:"0.05em",textTransform:"uppercase",marginBottom:12,lineHeight:1.2}},l.title),React.createElement("div",{style:{minHeight:100}},l.body),React.createElement("div",{style:{display:"flex",gap:6,justifyContent:"center",margin:"14px 0 14px"}},i.map((g,s)=>React.createElement("div",{key:s,style:{width:s===t?22:5,height:5,background:s===t?C.amber:s<t?C.amberDim:C.panelBorder,borderRadius:3,transition:"all 200ms"}}))),React.createElement("div",{style:{display:"flex",gap:8,justifyContent:"space-between",flexWrap:"wrap"}},React.createElement(Btn,{onClick:e,variant:"default",style:{fontSize:11}},"SKIP"),React.createElement("div",{style:{display:"flex",gap:8}},t>0&&React.createElement(Btn,{onClick:T,variant:"default"},"< BACK"),React.createElement(Btn,{onClick:h,variant:"solid"},c?"DONE":"NEXT >")))))},LearnPage=memo(({onShowTutorial:e})=>React.createElement(React.Fragment,null,React.createElement(Category,null,"Get oriented"),React.createElement(Panel,{title:"Walkthrough \xB7 Show me how to use this app",defaultOpen:!0,status:"START HERE",statusColor:C.green},React.createElement(P,null,"New here? Quick 10-slide tour highlighting each part of the app and explaining what it does. About a minute, no clicking required."),React.createElement(Btn,{onClick:e,variant:"solid"},"\u25B8 START WALKTHROUGH")),React.createElement(Panel,{title:"The one-paragraph version"},React.createElement(P,null,"A life table is a simple bookkeeping sheet. You follow a group of fish all born in the same year (a ",React.createElement(Term,null,"cohort"),"), count how many are still alive at each birthday, and write down how many offspring the survivors produce. From just those two columns of field data, you can calculate whether the population is growing, shrinking, or holding steady \u2014 and how fast."),React.createElement(P,{style:{color:C.textDim,margin:0}},"Everything else in this app is unpacking that one idea.")),React.createElement(Panel,{title:"Why fisheries biologists use them"},React.createElement(P,null,"Fisheries management needs to know if current fishing pressure is sustainable. Catch curves tell you the mortality rate, but only a life table combines mortality with reproduction, so you can answer the real question:"," ",React.createElement("em",{style:{color:C.amberBright}},"are enough new fish being produced to replace the ones being removed?")),React.createElement(P,null,"Every management lever \u2014 minimum size limits, closed seasons, slot limits \u2014 changes a specific column of the life table. Once you see how the columns connect, the effects of each policy become obvious.")),React.createElement(Panel,{title:"Cohort vs. Static tables \u2014 two ways to build one"},React.createElement(MiniHead,null,"Cohort (dynamic)"),React.createElement(P,null,"Tag 1,000 fry, come back every year, count how many are left. Clean data, but it takes a decade and you'll lose most of your tags. Rare in wild fish studies, common in hatchery work."),React.createElement(MiniHead,null,"Static (time-specific)"),React.createElement(P,null,"One big sample, one afternoon. Age every fish you catch (otoliths, scales), then ",React.createElement("em",null,"assume")," the age distribution you see represents what happens to a single cohort over time. Easier, but relies on the stable-age-distribution assumption.")),React.createElement(Category,null,"Common questions"),React.createElement(Panel,{title:'"Why does fecundity count only female offspring from females?"',status:"FAQ"},React.createElement(P,null,"Good question \u2014 this confuses most people the first time they see a life table. The short answer: yes, it's standard practice, and it's not specific to salmon. Every life table in animal demography does this. Here's why."),React.createElement(MiniHead,null,"Reason 1 \xB7 Females are the bottleneck"),React.createElement(P,null,"Population growth is limited by how many ",React.createElement("em",null,"mothers")," there are. One male can fertilize many females, so adding males doesn't directly grow the population. Adding females does. Tracking the female line gives you the limiting rate."),React.createElement(MiniHead,null,"Reason 2 \xB7 It avoids double-counting"),React.createElement(P,null,"Every fish has exactly one mother but a population may have many fathers per mother. If you counted offspring twice (once per parent), your numbers would double. By following only the maternal line, each offspring gets counted once."),React.createElement(MiniHead,null,"Reason 3 \xB7 Today's daughters are tomorrow's mothers"),React.createElement(P,null,"We count ",React.createElement("em",null,"female")," offspring specifically because we're projecting the next generation of mothers \u2014 those are the ones who'll continue the population. Male offspring matter for genetic diversity, but not for the next generation's growth ceiling."),React.createElement(MiniHead,null,"What if you want total offspring?"),React.createElement(P,null,`If sex ratio at birth is 1:1 (close to true for most fish), just multiply b(t) by 2 to get total offspring per female. R\u2080 would also double, but the ratios \u2014 whether the population is growing or shrinking \u2014 stay the same. That's why R\u2080 is conventionally reported as the "female-only" number.`),React.createElement(Example,null,"Salmon-specific note: same logic applies. A spawning female produces eggs; we count just her female offspring (~half her eggs at 1:1 sex ratio). The males matter biologically but not for the demographic math.")),React.createElement(Category,null,"The columns, one by one"),React.createElement(Panel,{title:"x \u2014 Age class",status:"INPUT"},React.createElement(P,null,"Age in years. Row 0 is the first year of life (ages 0 to 1). The rest follow sequentially. Could also be months or life stages (egg, larva, juvenile, adult) for species where age is hard to measure."),React.createElement(Example,null,"Default data: x runs from 0 to 9.")),React.createElement(Panel,{title:"N(t) \u2014 Number alive at age x",status:"INPUT \xB7 FIELD DATA"},React.createElement(P,null,"How many of the original cohort are still alive at the start of age x. This is observed data \u2014 the raw counts from your field surveys."),React.createElement(P,null,"N(t) always starts high and decreases. The starting value N(0) is arbitrary (often set to 1,000 for easy mental math), since the life table analyzes",React.createElement("em",null," proportions"),", not absolute numbers."),React.createElement(Example,null,"Default data: N(0) = 1000 fish. By age 5, only N(5) = 840 are still alive. By age 9, just 50 remain.")),React.createElement(Panel,{title:"b(t) \u2014 Fecundity",status:"INPUT \xB7 FIELD DATA"},React.createElement(P,null,"Average number of female offspring produced per female at age x, per year. See the FAQ above if you're wondering why we count it that way."),React.createElement(P,null,"b(t) is usually 0 before maturity, rises to a peak in prime reproductive years, then may decline in old age. You'll also see this written as"," ",React.createElement(Term,null,"m(x)")," in some textbooks; same thing."),React.createElement(Example,null,"Default data: no fish reproduce before age 4. Peak fecundity is 4 female offspring per female per year, happening at ages 5 and 6.")),React.createElement(Panel,{title:"l(x) \u2014 Survivorship (DERIVED)"},React.createElement(Formula,{note:"Proportion of original cohort still alive at age x. Always starts at 1."},"l(x) = N(x) / N(0)"),React.createElement(P,null,"This is N(t) normalized so it starts at 1. Makes it comparable across species and studies with different starting counts."),React.createElement(Example,null,"At age 5: l(5) = 840 / 1000 = ",React.createElement("strong",{style:{color:C.amberBright}},"0.840"),"."," ","So 84% of the cohort made it to their fifth birthday.")),React.createElement(Panel,{title:"d(x) \u2014 Number dying in interval (DERIVED)"},React.createElement(Formula,{note:"Deaths between age x and x+1."},"d(x) = N(x) \u2212 N(x+1)"),React.createElement(P,null,"The raw count of fish that died during that year of life."),React.createElement(Example,null,"At age 5: d(5) = N(5) \u2212 N(6) = 840 \u2212 710 = ",React.createElement("strong",{style:{color:C.amberBright}},"130 fish")," ","died between their 5th and 6th birthdays.")),React.createElement(Panel,{title:"q(x) \u2014 Age-specific mortality rate (DERIVED)"},React.createElement(Formula,{note:"The proportion of fish alive at age x that die before age x+1."},"q(x) = d(x) / N(x)"),React.createElement(P,null,"The probability a fish alive at age x will die during that year. Always between 0 and 1. In the final row, q(x) = 1 because everyone left dies during the last interval."),React.createElement(P,{style:{color:C.textDim,fontSize:13}},"Important: q(x) is a ",React.createElement("em",null,"rate"),`, not a count. A high q(x) at old age doesn't mean "most deaths happen there" \u2014 it means "most of the few fish still around at that age die that year." For absolute death counts, use d(x).`),React.createElement(Example,null,"At age 5: q(5) = 130 / 840 = ",React.createElement("strong",{style:{color:C.amberBright}},"0.155"),".")),React.createElement(Panel,{title:"l(x)\xB7b(x) \u2014 Reproductive contribution (DERIVED)"},React.createElement(Formula,{note:"Survival probability \xD7 fecundity at age x."},"l(x)\xB7b(x)"),React.createElement(P,null,"Expected female offspring a ",React.createElement("em",null,"newborn")," from the cohort will produce when she reaches age x \u2014 accounting for the fact that she might not make it."),React.createElement(Example,null,"At age 5: l(5)\xB7b(5) = 0.840 \xD7 4 = ",React.createElement("strong",{style:{color:C.amberBright}},"3.36"),".")),React.createElement(Panel,{title:"x\xB7l(x)\xB7b(x) \u2014 Age-weighted contribution (DERIVED)"},React.createElement(Formula,{note:"Reproductive contribution multiplied by the age at which it happens."},"x \xB7 l(x) \xB7 b(x)"),React.createElement(P,null,"Used only for calculating generation time."),React.createElement(Example,null,"At age 5: 5 \xD7 0.840 \xD7 4 = ",React.createElement("strong",{style:{color:C.amberBright}},"16.80"),".")),React.createElement(Category,null,"The three big metrics"),React.createElement(Panel,{title:"R\u2080 \u2014 Net reproductive rate (the headline)",status:"KEY"},React.createElement(Formula,{note:"Sum the l(x)\xB7b(x) column. That's it."},"R\u2080 = \u03A3 l(x) \xB7 b(x)"),React.createElement(P,null,"The average number of female offspring each female produces over her entire lifetime, already adjusted for the chance she dies before reproducing."),React.createElement("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(180px, 1fr))",gap:8,margin:"12px 0"}},React.createElement("div",{style:{padding:10,background:"rgba(106,194,122,0.08)",border:`1px solid ${C.green}`,borderRadius:2}},React.createElement("div",{style:{fontFamily:'"VT323", monospace',color:C.green,fontSize:15}},"R\u2080 > 1"),React.createElement("div",{style:{fontSize:12,color:C.text,marginTop:4}},"Growing. Each female more than replaces herself.")),React.createElement("div",{style:{padding:10,background:"rgba(232,195,90,0.08)",border:`1px solid ${C.amber}`,borderRadius:2}},React.createElement("div",{style:{fontFamily:'"VT323", monospace',color:C.amber,fontSize:15}},"R\u2080 = 1"),React.createElement("div",{style:{fontSize:12,color:C.text,marginTop:4}},"Stable. Exact replacement.")),React.createElement("div",{style:{padding:10,background:"rgba(216,112,96,0.08)",border:`1px solid ${C.red}`,borderRadius:2}},React.createElement("div",{style:{fontFamily:'"VT323", monospace',color:C.red,fontSize:15}},"R\u2080 < 1"),React.createElement("div",{style:{fontSize:12,color:C.text,marginTop:4}},"Declining. Not enough offspring to replace adults.")))),React.createElement(Panel,{title:"T \u2014 Generation time",status:"KEY"},React.createElement(Formula,{note:"Mean age at which mothers produce offspring."},"T = \u03A3 x \xB7 l(x) \xB7 b(x)  /  R\u2080"),React.createElement(P,null,"Short T = fast-turnover species (anchovies). Long T = slow-turnover species (sturgeon, rockfish). Long-T populations recover slowly from depletion.")),React.createElement(Panel,{title:"r \u2014 Intrinsic rate of increase",status:"KEY"},React.createElement(Formula,{note:"Approximation. Exact solution requires the Euler\u2013Lotka equation."},"r \u2248 ln(R\u2080) / T"),React.createElement(P,null,"Per-capita growth rate per year (continuous time). Plug into N(t) = N\u2080\xB7e\u02B3\u1D57 to project population size forward.")),React.createElement(Panel,{title:"\u03BB \u2014 Finite rate of increase"},React.createElement(Formula,{note:"Annual multiplier. \u03BB = e^r."},"\u03BB = e^r"),React.createElement(P,null,"Some textbooks prefer \u03BB to r. Same information. \u03BB = 1.5 means population size multiplies by 1.5\xD7 each year.")),React.createElement(Category,null,"Terms of use"),React.createElement(Panel,{title:"Educational & professional use \xB7 disclaimer"},React.createElement(P,{style:{fontWeight:500,color:C.amberBright}},"Read before using results in any official capacity."),React.createElement(MiniHead,null,"Intended use"),React.createElement(P,null,"COHORTLOG is provided for educational purposes (teaching life-table analysis, fisheries demography coursework) and as a working tool for professionals (fisheries biologists, agency staff, researchers, and consultants) for preliminary analysis, scenario exploration, and communication of life-table concepts."),React.createElement(MiniHead,null,"What this app does"),React.createElement(P,null,"It performs the standard life-table calculations: l(x), d(x), q(x), l(x)\xB7b(x), R\u2080, T, and the approximation r \u2248 ln(R\u2080)/T. Math is deterministic and verifiable \u2014 formulas are documented in this Reference tab."),React.createElement(MiniHead,null,"What this app does NOT do"),React.createElement(P,null,"It does not solve the exact Euler\u2013Lotka equation, account for stochasticity or environmental variability, perform sensitivity analysis, or substitute for stock assessment. The 10-year projection assumes constant vital rates and exponential growth \u2014 real populations rarely behave this way."),React.createElement(MiniHead,null,"Data accuracy"),React.createElement(P,null,"Output quality depends entirely on input quality. Garbage in, garbage out. The user is responsible for verifying that input data are accurate, appropriate for the species and population, and collected with sound sampling methods."),React.createElement(MiniHead,null,"No warranty \xB7 No liability"),React.createElement(P,null,'This software is provided "as is", without warranty of any kind, express or implied. The author makes no representations about its suitability for any particular purpose. Use it at your own risk. Decisions affecting managed fish stocks, regulatory action, harvest quotas, or environmental permits should be supported by formal stock assessments and reviewed by qualified fisheries scientists.'),React.createElement(MiniHead,null,"Citation"),React.createElement(P,{style:{color:C.textDim,fontSize:13}},"If you use COHORTLOG in coursework, presentations, or publications, please cite it as: Stocklin, M. (2026). COHORTLOG (Version 1.2) \u2014 Interactive Life Table Analysis."),React.createElement(MiniHead,null,"Privacy"),React.createElement(P,{style:{color:C.textDim,fontSize:13}},"This app runs entirely in your browser. Your data never leaves your device. Edits are stored locally (browser localStorage) on your machine only.")))),tdCell=e=>({padding:"8px 6px",textAlign:"center",color:e,letterSpacing:"0.05em",borderRight:`1px solid ${C.panelBorder}`}),inputStyle={width:64,background:C.inputBg,border:`1px solid ${C.panelBorder}`,color:C.amberBright,fontFamily:'"VT323", monospace',fontSize:15,textAlign:"center",padding:"3px 4px",borderRadius:2,letterSpacing:"0.05em",outline:"none"},MetricBox=memo(({symbol:e,label:t,value:a,note:i,noteColor:l=C.textDim,delta:c,plain:r,tooltip:o})=>React.createElement("div",{title:o,style:{background:"rgba(0,0,0,0.25)",border:`1px solid ${C.panelBorder}`,borderLeft:`3px solid ${C.amber}`,padding:"12px 14px",borderRadius:2,cursor:o?"help":"default"}},React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:4}},React.createElement("span",{style:{fontFamily:'"VT323", monospace',fontSize:26,color:C.amberBright}},e),React.createElement("span",{style:{fontFamily:'"VT323", monospace',fontSize:11,color:C.textDim,letterSpacing:"0.15em"}},t)),React.createElement("div",{style:{fontFamily:'"VT323", monospace',fontSize:24,color:C.amber,letterSpacing:"0.03em"}},a),r&&React.createElement("div",{style:{fontFamily:'"IBM Plex Sans", sans-serif',fontSize:11.5,color:C.text,marginTop:6,lineHeight:1.4}},r),React.createElement("div",{style:{display:"flex",justifyContent:"space-between",marginTop:6,gap:8,flexWrap:"wrap"}},React.createElement("span",{style:{fontFamily:'"VT323", monospace',fontSize:12,color:l,letterSpacing:"0.08em"}},i),c&&React.createElement("span",{style:{fontFamily:'"VT323", monospace',fontSize:12,color:c.color,letterSpacing:"0.08em"}},c.text)))),fmt=(e,t=3)=>e===0?"\u2014":typeof e=="number"&&isFinite(e)?e.toFixed(t):"\u2014",Warnings=({warnings:e})=>e.length===0?null:React.createElement("div",{style:{background:"rgba(216,112,96,0.08)",border:`1px solid ${C.red}`,borderLeft:`3px solid ${C.red}`,padding:"10px 14px",marginBottom:14,borderRadius:2}},React.createElement("div",{style:{fontFamily:'"VT323", monospace',fontSize:12,color:C.red,letterSpacing:"0.2em",marginBottom:6}},"\u26A0 DATA WARNING",e.length>1?"S":""),e.map((t,a)=>React.createElement("div",{key:a,style:{fontSize:13,color:C.text,lineHeight:1.5}},"\u2022 ",t))),MobileRow=memo(({row:e,index:t,onUpdate:a})=>React.createElement("div",{style:{background:"rgba(0,0,0,0.25)",border:`1px solid ${C.panelBorder}`,borderLeft:`3px solid ${C.amber}`,padding:"12px 14px",borderRadius:2,marginBottom:8}},React.createElement("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}},React.createElement("div",{style:{fontFamily:'"VT323", monospace',fontSize:18,color:C.amber,letterSpacing:"0.1em"}},"AGE ",e.x)),React.createElement("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}},React.createElement("label",{style:{fontFamily:'"VT323", monospace',fontSize:13,color:C.amberBright}},"N(t) ",React.createElement("span",{style:{fontFamily:'"IBM Plex Sans", sans-serif',fontSize:10,color:C.textDim,letterSpacing:"0.05em",textTransform:"uppercase"}},"\xB7 alive"),React.createElement("input",{type:"number",value:e.Nt,min:"0",id:`cl-nt-${e.x}`,onChange:i=>a(t,"Nt",i.target.value),style:{...inputStyle,width:"100%",marginTop:2}})),React.createElement("label",{style:{fontFamily:'"VT323", monospace',fontSize:13,color:C.amberBright}},"b(t) ",React.createElement("span",{style:{fontFamily:'"IBM Plex Sans", sans-serif',fontSize:10,color:C.textDim,letterSpacing:"0.05em",textTransform:"uppercase"}},"\xB7 fecundity"),React.createElement("input",{type:"number",value:e.bt,min:"0",step:"0.1",id:`cl-bt-${e.x}`,onChange:i=>a(t,"bt",i.target.value),style:{...inputStyle,width:"100%",marginTop:2}}))),React.createElement("div",{style:{fontFamily:'"VT323", monospace',fontSize:12,color:C.textDim,letterSpacing:"0.05em",display:"grid",gridTemplateColumns:"repeat(3, 1fr)",gap:6}},React.createElement("span",{title:"Survivorship: proportion of cohort still alive"},"l(x) ",React.createElement("span",{style:{fontSize:9}},"survive"),":"," ",React.createElement("span",{style:{color:C.text}},fmt(e.lx))),React.createElement("span",{title:"Number dying in interval"},"d(x) ",React.createElement("span",{style:{fontSize:9}},"deaths"),":"," ",React.createElement("span",{style:{color:C.text}},e.dx)),React.createElement("span",{title:"Age-specific mortality rate"},"q(x) ",React.createElement("span",{style:{fontSize:9}},"rate"),":"," ",React.createElement("span",{style:{color:C.text}},fmt(e.qx))),React.createElement("span",{title:"Reproductive contribution at age x"},"l\xB7b ",React.createElement("span",{style:{fontSize:9}},"repro"),":"," ",React.createElement("span",{style:{color:C.text}},fmt(e.lxbx))),React.createElement("span",{title:"Age-weighted reproductive contribution"},"x\xB7l\xB7b ",React.createElement("span",{style:{fontSize:9}},"weighted"),":"," ",React.createElement("span",{style:{color:C.text}},fmt(e.xlxbx)))))),CalcPage=({rawData:e,setRawData:t,computed:a,scenario:i,setScenario:l,isMobile:c})=>{const{rows:r,R0:o,T:f,r:p,lambda:m}=a,y=useCallback((n,b,v)=>{const S=parseFloat(v);t(k=>{const R=k.slice();return R[n]={...R[n],[b]:isNaN(S)?0:Math.max(0,S)},R})},[t]),h=useCallback(()=>t(cloneInitial()),[t]),T=useCallback(()=>{const n={rawData:e,computed:a,savedAt:new Date().toISOString()};l(n),saveStored(SCENARIO_KEY,n)},[e,a,l]),g=useCallback(()=>{l(null);try{localStorage.removeItem(SCENARIO_KEY)}catch{}},[l]),s=useCallback(()=>downloadCSV(e,a),[e,a]),d=useMemo(()=>r.reduce((n,b)=>n+b.lxbx,0),[r]),u=useMemo(()=>r.reduce((n,b)=>n+b.xlxbx,0),[r]),w=useMemo(()=>validateData(e),[e]),x=useMemo(()=>{if(!i)return null;const n=(b,v)=>{const S=b-v,k=v!==0?S/Math.abs(v)*100:0,R=S>0?"+":"",F=S>0?C.green:S<0?C.red:C.textDim;return{text:`\u0394 ${R}${S.toFixed(2)} (${R}${k.toFixed(1)}%)`,color:F}};return{R0:n(o,i.computed.R0),T:n(f,i.computed.T),r:n(p,i.computed.r),lambda:n(m,i.computed.lambda)}},[i,o,f,p,m]);return React.createElement(React.Fragment,null,React.createElement(Category,null,"Working sheet"),React.createElement(Warnings,{warnings:w}),React.createElement(Panel,{title:"Input data \xB7 N(t) and b(t)",defaultOpen:!0,status:"EDITABLE",id:"cl-table"},React.createElement(P,null,"Edit the two yellow columns. All other columns recalculate automatically, and your edits are saved between sessions."),React.createElement("div",{id:"cl-buttons",style:{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap"}},React.createElement(Btn,{onClick:h,variant:"default"},"> RESET"),React.createElement(Btn,{onClick:T,variant:"cyan"},"\u25BE SAVE SCENARIO"),i&&React.createElement(Btn,{onClick:g,variant:"red"},"\u2715 CLEAR SCENARIO"),React.createElement(Btn,{onClick:s,variant:"green"},"\u2193 EXPORT XLSX")),i&&React.createElement("div",{style:{background:"rgba(94,204,224,0.06)",border:`1px solid ${C.cyan}`,borderLeft:`3px solid ${C.cyan}`,padding:"8px 12px",marginBottom:14,borderRadius:2,fontSize:13,color:C.text}},React.createElement("span",{style:{fontFamily:'"VT323", monospace',fontSize:12,color:C.cyan,letterSpacing:"0.2em",marginRight:8}},"\u25B8 BASELINE LOCKED"),"R\u2080 = ",i.computed.R0.toFixed(3)," \xB7 saved"," ",new Date(i.savedAt).toLocaleString()),c?React.createElement("div",null,r.map((n,b)=>React.createElement(MobileRow,{key:n.x,row:n,index:b,onUpdate:y})),React.createElement("div",{style:{background:"rgba(232,195,90,0.12)",border:`1px solid ${C.amber}`,padding:"10px 14px",borderRadius:2,marginTop:8,display:"flex",justifyContent:"space-between",fontFamily:'"VT323", monospace',fontSize:14,flexWrap:"wrap",gap:8}},React.createElement("span",{style:{color:C.amber,letterSpacing:"0.1em"}},"\u03A3 TOTALS"),React.createElement("span",{style:{color:C.amberBright}},"l\xB7b = ",d.toFixed(3)," \xB7 x\xB7l\xB7b = ",u.toFixed(3)))):React.createElement("div",{style:{overflowX:"auto"}},React.createElement("table",{style:{width:"100%",borderCollapse:"collapse",fontFamily:'"VT323", monospace',fontSize:15,minWidth:640}},React.createElement("thead",null,React.createElement("tr",{style:{background:"rgba(232,195,90,0.08)",borderTop:`1px solid ${C.amber}`,borderBottom:`1px solid ${C.amber}`}},[["x","age",C.amber,"Age class in years"],["N(t)","alive",C.amberBright,"Number of fish alive at start of age x. Field data \u2014 editable."],["b(t)","fecundity",C.amberBright,"Female offspring per female at age x. Field data \u2014 editable."],["l(x)","survivorship",C.textDim,"Proportion of original cohort still alive: l(x) = N(x) / N(0)"],["d(x)","deaths",C.textDim,"Number dying in interval: d(x) = N(x) \u2212 N(x+1)"],["q(x)","death rate",C.textDim,"Probability of dying at age x: q(x) = d(x) / N(x)"],["l\xB7b","repro contrib",C.textDim,"Reproductive contribution: l(x) \xB7 b(x). Sums to R\u2080."],["x\xB7l\xB7b","age-weighted",C.textDim,"x \xB7 l(x) \xB7 b(x). Used to compute generation time T."]].map(([n,b,v,S],k)=>React.createElement("th",{key:n,title:S,style:{padding:"8px 6px",textAlign:"center",color:v,letterSpacing:"0.1em",fontWeight:400,borderRight:k<7?`1px solid ${C.panelBorder}`:"none",cursor:"help"}},React.createElement("div",null,n),React.createElement("div",{style:{fontFamily:'"IBM Plex Sans", sans-serif',fontSize:9.5,color:C.textDim,fontWeight:400,letterSpacing:"0.08em",textTransform:"uppercase",marginTop:3,opacity:.85}},b))))),React.createElement("tbody",null,r.map((n,b)=>React.createElement("tr",{key:n.x,style:{borderBottom:`1px solid ${C.panelBorder}`,background:b%2===0?"transparent":"rgba(255,255,255,0.02)"}},React.createElement("td",{style:tdCell(C.amber)},n.x),React.createElement("td",{style:tdCell(C.amberBright)},React.createElement("input",{type:"number",value:n.Nt,min:"0",id:`cl-nt-${n.x}`,"aria-label":`Number alive at age ${n.x}`,onChange:v=>y(b,"Nt",v.target.value),style:inputStyle})),React.createElement("td",{style:tdCell(C.amberBright)},React.createElement("input",{type:"number",value:n.bt,min:"0",step:"0.1",id:`cl-bt-${n.x}`,"aria-label":`Fecundity at age ${n.x}`,onChange:v=>y(b,"bt",v.target.value),style:inputStyle})),React.createElement("td",{style:tdCell(C.text)},fmt(n.lx)),React.createElement("td",{style:tdCell(C.text)},n.dx),React.createElement("td",{style:tdCell(C.text)},fmt(n.qx)),React.createElement("td",{style:tdCell(C.text)},fmt(n.lxbx)),React.createElement("td",{style:tdCell(C.text)},fmt(n.xlxbx)))),React.createElement("tr",{style:{background:"rgba(232,195,90,0.12)",borderTop:`1px solid ${C.amber}`}},React.createElement("td",{colSpan:6,style:{padding:"10px 12px",textAlign:"right",color:C.amber,letterSpacing:"0.1em"}},"\u03A3 \u2550\u2550\u2550\u25B6"),React.createElement("td",{style:{padding:"10px 8px",textAlign:"center",color:C.amberBright,letterSpacing:"0.05em"}},d.toFixed(3)),React.createElement("td",{style:{padding:"10px 8px",textAlign:"center",color:C.amberBright,letterSpacing:"0.05em"}},u.toFixed(3))))))),React.createElement(Panel,{title:"Demographic parameters",defaultOpen:!0,status:"OUTPUT",id:"cl-metrics"},React.createElement("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(210px, 1fr))",gap:12}},React.createElement(MetricBox,{symbol:"R\u2080",label:"NET REPRO. RATE",value:o.toFixed(3),plain:"Lifetime female offspring per female",tooltip:"R\u2080 = \u03A3 l(x)\xB7b(x). The headline number \u2014 above 1 means population grows.",note:o>1?"Growing \u25B2":o<1?"Declining \u25BC":"Stable \u2550",noteColor:o>1?C.green:o<1?C.red:C.amber,delta:x?.R0}),React.createElement(MetricBox,{symbol:"T",label:"GENERATION TIME",value:`${f.toFixed(2)} yr`,plain:"Average mother's age at reproduction",tooltip:"T = \u03A3 x\xB7l(x)\xB7b(x) / R\u2080. Mean age at which offspring are produced.",note:"\u03A3 x\xB7l\xB7b / R\u2080",delta:x?.T}),React.createElement(MetricBox,{symbol:"r",label:"INTRINSIC RATE",value:`${p.toFixed(3)} /yr`,plain:"Per-year growth rate",tooltip:"r \u2248 ln(R\u2080) / T. Plug into N(t) = N\u2080\xB7e^(rt) to project forward.",note:"\u2248 ln(R\u2080) / T",delta:x?.r}),React.createElement(MetricBox,{symbol:"\u03BB",label:"FINITE RATE",value:`${m.toFixed(3)}\xD7`,plain:"Per-year population multiplier",tooltip:"\u03BB = e^r. \u03BB = 1.5 means population multiplies by 1.5\xD7 each year.",note:"annual multiplier",delta:x?.lambda})),i&&React.createElement(P,{style:{fontSize:12,color:C.textDim,fontStyle:"italic",marginTop:12,marginBottom:0}},"\u0394 values show change vs saved baseline. Edit values to see impact.")),React.createElement(Panel,{title:"Step-by-step \xB7 How R\u2080 was calculated",status:"HELP"},React.createElement(P,null,"R\u2080 is just the sum of the l\xB7b column. Here are all the rows:"),React.createElement("div",{style:{fontFamily:'"VT323", monospace',fontSize:14,color:C.text,lineHeight:1.8,background:"rgba(0,0,0,0.25)",padding:14,borderRadius:2,border:`1px solid ${C.panelBorder}`,overflowX:"auto"}},r.map(n=>React.createElement("div",{key:n.x,style:{display:"flex",justifyContent:"space-between",gap:12,whiteSpace:"nowrap"}},React.createElement("span",{style:{color:C.textDim}},"age ",n.x,": l(",n.x,")\xD7b(",n.x,") = ",n.lx.toFixed(3)," \xD7 ",n.bt),React.createElement("span",{style:{color:n.lxbx>0?C.amber:C.textDim}},"= ",n.lxbx.toFixed(3)))),React.createElement("div",{style:{borderTop:`1px dashed ${C.amber}`,marginTop:6,paddingTop:6,display:"flex",justifyContent:"space-between",color:C.amberBright,gap:12}},React.createElement("span",null,"R\u2080 = sum"),React.createElement("span",null,"= ",o.toFixed(3))))))},axisProps={stroke:C.textDim,tick:{fill:C.text,fontSize:12,fontFamily:'"VT323", monospace'}},tipStyle={background:C.panel,border:`1px solid ${C.amber}`,fontFamily:'"VT323", monospace',fontSize:13,color:C.amber,borderRadius:2},tipFormatter=e=>typeof e=="number"?e.toFixed(3):e,CurvesPage=({computed:e})=>{const{rows:t}=e;return React.createElement(React.Fragment,null,React.createElement(Category,null,"Visualization"),React.createElement(Panel,{title:"Fig. 1 \xB7 Survivorship curve \u2014 l(x)",defaultOpen:!0},React.createElement(P,{style:{fontSize:13,color:C.textDim}},"Log y-axis reveals the mortality pattern. Concave (steep early drop) = Type III, most fish. Straight line = Type II, constant mortality. Convex (flat then steep drop) = Type I, long-lived."),React.createElement(ResponsiveContainer,{width:"100%",height:240},React.createElement(LineChart,{data:t,margin:{top:10,right:20,left:10,bottom:20}},React.createElement(CartesianGrid,{stroke:C.panelBorder,strokeDasharray:"2 4"}),React.createElement(XAxis,{dataKey:"x",...axisProps,label:{value:"age x (years)",position:"insideBottom",offset:-4,fill:C.textDim,fontSize:11,fontFamily:'"VT323", monospace'}}),React.createElement(YAxis,{...axisProps,scale:"log",domain:[.01,1],ticks:[.01,.1,1],tickFormatter:a=>a.toString(),label:{value:"l(x)  [log]",angle:-90,position:"insideLeft",fill:C.textDim,fontSize:11,fontFamily:'"VT323", monospace'}}),React.createElement(Tooltip,{contentStyle:tipStyle,formatter:tipFormatter}),React.createElement(Line,{type:"monotone",dataKey:"lx",stroke:C.amber,strokeWidth:2.5,dot:{fill:C.amber,r:4},activeDot:{r:6,fill:C.amberBright},name:"l(x)",isAnimationActive:!1})))),React.createElement(Panel,{title:"Fig. 2 \xB7 Mortality rate q(x) vs deaths d(x)",defaultOpen:!0},React.createElement(P,{style:{fontSize:13,color:C.textDim}},"Two ways to look at mortality. Red bars (q(x), left axis) show the",React.createElement("em",null," probability")," of dying \u2014 high at old ages because few fish are left. Cyan line (d(x), right axis) shows the ",React.createElement("em",null,"raw count")," of deaths \u2014 peaks in the middle ages, where the most fish are dying in absolute terms."),React.createElement(ResponsiveContainer,{width:"100%",height:240},React.createElement(ComposedChart,{data:t,margin:{top:10,right:30,left:10,bottom:20}},React.createElement(CartesianGrid,{stroke:C.panelBorder,strokeDasharray:"2 4"}),React.createElement(XAxis,{dataKey:"x",...axisProps,label:{value:"age x (years)",position:"insideBottom",offset:-4,fill:C.textDim,fontSize:11,fontFamily:'"VT323", monospace'}}),React.createElement(YAxis,{yAxisId:"left",...axisProps,domain:[0,1],label:{value:"q(x)",angle:-90,position:"insideLeft",fill:C.red,fontSize:11,fontFamily:'"VT323", monospace'}}),React.createElement(YAxis,{yAxisId:"right",orientation:"right",...axisProps,label:{value:"d(x)",angle:90,position:"insideRight",fill:C.cyan,fontSize:11,fontFamily:'"VT323", monospace'}}),React.createElement(Tooltip,{contentStyle:tipStyle,formatter:tipFormatter}),React.createElement(Legend,{wrapperStyle:{fontFamily:'"VT323", monospace',fontSize:12,color:C.textDim}}),React.createElement(Bar,{yAxisId:"left",dataKey:"qx",fill:C.red,name:"q(x) rate",radius:[2,2,0,0],isAnimationActive:!1}),React.createElement(Line,{yAxisId:"right",type:"monotone",dataKey:"dx",stroke:C.cyan,strokeWidth:2.5,dot:{fill:C.cyan,r:4},name:"d(x) count",isAnimationActive:!1})))),React.createElement(Panel,{title:"Fig. 3 \xB7 Reproductive contribution \u2014 l(x)\xB7b(x)",defaultOpen:!0},React.createElement(P,{style:{fontSize:13,color:C.textDim}},"The area under the amber curve equals R\u2080. Green bars are raw fecundity b(x). Amber line is b(x) discounted by survival l(x). Notice how old fish with declining survival contribute less even if they still reproduce."),React.createElement(ResponsiveContainer,{width:"100%",height:240},React.createElement(ComposedChart,{data:t,margin:{top:10,right:20,left:10,bottom:20}},React.createElement(CartesianGrid,{stroke:C.panelBorder,strokeDasharray:"2 4"}),React.createElement(XAxis,{dataKey:"x",...axisProps,label:{value:"age x (years)",position:"insideBottom",offset:-4,fill:C.textDim,fontSize:11,fontFamily:'"VT323", monospace'}}),React.createElement(YAxis,{...axisProps}),React.createElement(Tooltip,{contentStyle:tipStyle,formatter:tipFormatter}),React.createElement(Legend,{wrapperStyle:{fontFamily:'"VT323", monospace',fontSize:12,color:C.textDim}}),React.createElement(Area,{type:"monotone",dataKey:"lxbx",fill:C.amber,fillOpacity:.2,stroke:"none",name:"area = R\u2080",isAnimationActive:!1}),React.createElement(Bar,{dataKey:"bt",fill:C.green,name:"b(x) raw",opacity:.5,radius:[2,2,0,0],isAnimationActive:!1}),React.createElement(Line,{type:"monotone",dataKey:"lxbx",stroke:C.amberBright,strokeWidth:2.5,dot:{fill:C.amberBright,r:4},name:"l(x)\xB7b(x)",isAnimationActive:!1})))))},FindingBox=memo(({label:e,value:t,note:a})=>React.createElement("div",{style:{background:"rgba(0,0,0,0.25)",border:`1px solid ${C.panelBorder}`,borderLeft:`3px solid ${C.cyan}`,padding:"12px 14px",borderRadius:2}},React.createElement("div",{style:{fontFamily:'"VT323", monospace',fontSize:11,color:C.cyan,letterSpacing:"0.2em",marginBottom:4}},e),React.createElement("div",{style:{fontFamily:'"VT323", monospace',fontSize:22,color:C.amberBright,letterSpacing:"0.04em"}},t),React.createElement("div",{style:{fontFamily:'"VT323", monospace',fontSize:12,color:C.textDim,marginTop:4,letterSpacing:"0.05em"}},a))),Lever=memo(({t:e,e:t})=>React.createElement("div",{style:{padding:"10px 14px",background:"rgba(232,195,90,0.04)",borderLeft:`2px solid ${C.amber}`,borderRadius:2}},React.createElement("div",{style:{fontFamily:'"VT323", monospace',fontSize:15,color:C.amber,letterSpacing:"0.06em",marginBottom:3}},"\u25B8 ",e),React.createElement("div",{style:{fontFamily:'"IBM Plex Sans", sans-serif',fontSize:13,color:C.text,lineHeight:1.5}},t))),InterpretPage=({computed:e})=>{const{rows:t,R0:a,T:i,r:l,lambda:c}=e,r=useMemo(()=>{const g=t.reduce((x,n)=>n.lxbx>(x?.lxbx??-1)?n:x,null),s=t.find(x=>x.bt>0)?.x??"\u2014",d=t[t.length-1]?.x,u=t[0]?.sx||0,w=t[t.length-1]?.lx||0;return{peakRepro:g,ageMaturity:s,maxAge:d,firstYearSurvival:u,oldestCohortSurvival:w}},[t]),o=useMemo(()=>a>1.5?{w:"GROWING STRONGLY",c:C.green,ic:"\u25B2\u25B2"}:a>1?{w:"GROWING",c:C.green,ic:"\u25B2"}:a===1?{w:"STABLE",c:C.amber,ic:"\u2550"}:a>0?{w:"DECLINING",c:C.red,ic:"\u25BC"}:{w:"COLLAPSING",c:C.red,ic:"\u25BC\u25BC"},[a]),f=useMemo(()=>{const g=new Array(11);for(let s=0;s<=10;s++)g[s]={year:s,N:Math.round(1e3*Math.exp(l*s))};return g},[l]),{peakRepro:p,ageMaturity:m,maxAge:y,firstYearSurvival:h,oldestCohortSurvival:T}=r;return React.createElement(React.Fragment,null,React.createElement(Category,null,"Diagnosis"),React.createElement(Panel,{title:"Headline \xB7 Population status",defaultOpen:!0,status:o.w,statusColor:o.c},React.createElement("div",{style:{background:"rgba(0,0,0,0.3)",padding:"18px 20px",border:`1px solid ${o.c}`,borderLeft:`4px solid ${o.c}`,borderRadius:2,marginBottom:14}},React.createElement("div",{style:{fontFamily:'"VT323", monospace',fontSize:13,color:o.c,letterSpacing:"0.2em",marginBottom:6}},"\u25B8 STATUS: ",o.ic),React.createElement("div",{style:{fontFamily:'"VT323", monospace',fontSize:28,color:o.c,letterSpacing:"0.08em",lineHeight:1.1}},"POPULATION IS ",o.w)),React.createElement(P,null,"Each female produces, on average,"," ",React.createElement("strong",{style:{color:C.amberBright}},a.toFixed(2))," ","female offspring in her lifetime. With a generation time of"," ",React.createElement("strong",{style:{color:C.amberBright}},i.toFixed(1)," years"),", the intrinsic growth rate is"," ",React.createElement("strong",{style:{color:C.amberBright}},"r = ",l.toFixed(3)," per year"),", meaning population size multiplies by"," ",React.createElement("strong",{style:{color:C.amberBright}},c.toFixed(2),"\xD7")," ","annually.")),React.createElement(Panel,{title:"Life history findings",defaultOpen:!0},React.createElement("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit, minmax(240px, 1fr))",gap:12}},React.createElement(FindingBox,{label:"AGE AT FIRST REPRO",value:`${m} yr`,note:typeof m=="number"&&m>=4?"delayed maturity":"early maturity"}),React.createElement(FindingBox,{label:"PEAK REPRO AGE",value:p?`${p.x} yr`:"\u2014",note:p?`contributes ${p.lxbx.toFixed(2)} to R\u2080`:""}),React.createElement(FindingBox,{label:"MAX OBSERVED AGE",value:`${y} yr`,note:`${(T*100).toFixed(1)}% reach this age`}),React.createElement(FindingBox,{label:"FIRST-YEAR SURVIVAL",value:`${(h*100).toFixed(1)}%`,note:h<.5?"high juvenile mortality":"strong early survival"}))),React.createElement(Panel,{title:"Fig. 4 \xB7 10-year projection",defaultOpen:!0},React.createElement(P,{style:{fontSize:13,color:C.textDim}},"Exponential model N(t) = 1000\xB7e^(",l.toFixed(3),`\xB7t) assuming current vital rates hold constant. Real stocks rarely grow this cleanly \u2014 density dependence, environment, and fishing all kick in \u2014 but it's a useful "what if nothing changes" scenario.`),React.createElement(ResponsiveContainer,{width:"100%",height:240},React.createElement(LineChart,{data:f,margin:{top:10,right:20,left:10,bottom:20}},React.createElement(CartesianGrid,{stroke:C.panelBorder,strokeDasharray:"2 4"}),React.createElement(XAxis,{dataKey:"year",...axisProps,label:{value:"years into future",position:"insideBottom",offset:-4,fill:C.textDim,fontSize:11,fontFamily:'"VT323", monospace'}}),React.createElement(YAxis,{...axisProps}),React.createElement(Tooltip,{contentStyle:tipStyle}),React.createElement(Line,{type:"monotone",dataKey:"N",stroke:C.green,strokeWidth:2.5,dot:{fill:C.green,r:4},name:"N(t)",isAnimationActive:!1})))),React.createElement(Panel,{title:"Management levers \xB7 What to try"},React.createElement(P,null,"Life tables turn abstract management decisions into concrete number changes. Save a baseline scenario on the Table tab, then try editing:"),React.createElement("div",{style:{display:"grid",gap:10}},React.createElement(Lever,{t:"Raise a minimum-size limit",e:"Reduce q(x) for the youngest legal sizes. Watch R\u2080 climb as more fish survive to spawn."}),React.createElement(Lever,{t:"Open a spawning-season fishery",e:"Cut b(x) at peak reproductive ages. Even small cuts to the middle of the b(x) column crater R\u2080."}),React.createElement(Lever,{t:"Introduce a slot limit (protect big old spawners)",e:"Keep l(x) high at ages 5\u20137. These fish are the biggest contributors to R\u2080."}),React.createElement(Lever,{t:"Improve juvenile habitat",e:"Raise N(1), N(2), N(3). Survival compounds, so boosting juvenile survival is often the highest-leverage intervention."}))))},PAGES=[{id:"calc",label:"Table"},{id:"curves",label:"Curves"},{id:"interpret",label:"Diagnose"},{id:"learn",label:"Reference"}];function App(){const[e,t]=useState("calc"),[a,i]=useState(loadInitialData),[l,c]=useState(()=>loadStored(SCENARIO_KEY,null)),[r,o]=useState(!1),[f,p]=useState(typeof window<"u"&&window.innerWidth<600),m=useMemo(()=>computeLifeTable(a),[a]);useEffect(()=>{const d=()=>p(window.innerWidth<600);return window.addEventListener("resize",d),()=>window.removeEventListener("resize",d)},[]),useEffect(()=>{loadStored(TUTORIAL_KEY,!1)||o(!0)},[]);const y=useCallback(()=>{o(!1),saveStored(TUTORIAL_KEY,!0)},[]),h=useCallback(()=>{o(!0)},[]);useEffect(()=>{const d=()=>saveStored(STORAGE_KEY,a);let u;return typeof requestIdleCallback=="function"?(u=requestIdleCallback(d,{timeout:800}),()=>cancelIdleCallback(u)):(u=setTimeout(d,400),()=>clearTimeout(u))},[a]),useEffect(()=>{const d=document.getElementById("loading");d&&(d.style.display="none")},[]);const T=m.R0.toFixed(2),g=m.R0>1?"GROWING":m.R0<1?"DECLINING":"STABLE",s=m.R0>1?C.green:m.R0<1?C.red:C.amber;return React.createElement("div",{style:{minHeight:"100vh",background:`radial-gradient(ellipse at 20% 15%, ${C.bg2} 0%, ${C.bg1} 25%, ${C.bg0} 60%, #051520 100%)`,fontFamily:'"IBM Plex Sans", "Helvetica Neue", sans-serif',color:C.text,position:"relative",paddingBottom:120}},React.createElement(Bubbles,null),r&&React.createElement(Walkthrough,{onClose:y}),React.createElement("header",{id:"cl-header",style:{position:"relative",zIndex:2,padding:"16px 24px 10px",display:"flex",justifyContent:"space-between",alignItems:"flex-start",borderTop:`3px solid ${C.amber}`,borderBottom:`1px solid ${C.panelBorder}`,flexWrap:"wrap",gap:8,background:"rgba(10,34,48,0.6)",backdropFilter:"blur(2px)"}},React.createElement("div",null,React.createElement("div",{style:{fontFamily:'"VT323", monospace',fontSize:22,color:C.text,letterSpacing:"0.1em"}},"COHORTLOG 1.2"),React.createElement("div",{style:{display:"inline-block",marginTop:8,padding:"4px 10px",border:`1px solid ${C.panelBorder}`,background:"rgba(0,0,0,0.3)",fontFamily:'"VT323", monospace',fontSize:12,color:C.textDim,letterSpacing:"0.15em"}},a.length," AGE CLASSES \xB7 R\u2080 = ",T)),React.createElement("div",{style:{padding:"4px 10px",border:`1px solid ${s}`,background:"rgba(0,0,0,0.3)",fontFamily:'"VT323", monospace',fontSize:12,color:s,letterSpacing:"0.2em"}},g)),React.createElement("main",{style:{position:"relative",zIndex:2,maxWidth:860,margin:"0 auto",padding:"20px 16px 40px"}},e==="calc"&&React.createElement(CalcPage,{rawData:a,setRawData:i,computed:m,scenario:l,setScenario:c,isMobile:f}),e==="curves"&&React.createElement(CurvesPage,{computed:m}),e==="interpret"&&React.createElement(InterpretPage,{computed:m}),e==="learn"&&React.createElement(LearnPage,{onShowTutorial:h})),React.createElement("footer",{style:{position:"relative",zIndex:2,textAlign:"center",padding:"16px 20px 24px",fontFamily:'"VT323", monospace',fontSize:13,color:C.amber,letterSpacing:"0.15em"}},"CREATED BY MICHAEL STOCKLIN \xB7 2026"),React.createElement("nav",{id:"cl-nav",style:{position:"fixed",bottom:0,left:0,right:0,display:"grid",gridTemplateColumns:`repeat(${PAGES.length}, 1fr)`,background:C.bg1,borderTop:`1px solid ${C.panelBorder}`,zIndex:10}},PAGES.map(d=>{const u=e===d.id;return React.createElement("button",{key:d.id,onClick:()=>t(d.id),"aria-current":u?"page":void 0,style:{padding:"14px 8px",background:u?C.tabBlueActive:C.tabBlue,border:"none",borderRight:`1px solid ${C.panelBorder}`,cursor:"pointer",fontFamily:'"IBM Plex Sans", sans-serif',fontSize:13,color:u?"#fff":"rgba(255,255,255,0.85)",fontWeight:u?600:400,letterSpacing:"0.02em"}},d.label)})))}const root=ReactDOM.createRoot(document.getElementById("root"));root.render(React.createElement(App,null));
+
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", tick);
+  } else {
+    tick();
+  }
+})();
 </script>
 </body>
 </html>
